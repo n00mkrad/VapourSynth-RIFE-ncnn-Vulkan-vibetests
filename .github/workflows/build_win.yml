@@ -1,0 +1,43 @@
+name: BuildWin
+on:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Setup Vulkan SDK
+        shell: pwsh
+        run: |
+          $url = 'https://sdk.lunarg.com/sdk/download/1.3.275.0/windows/VulkanSDK-1.3.275.0-Installer.exe'
+          $installerFile = 'VulkanSDK-1.3.275.0-Installer.exe'
+          Invoke-WebRequest -Uri $url -OutFile $installerFile
+          Start-Process -FilePath $installerFile -ArgumentList '--accept-licenses', '--default-answer', '--confirm-command', 'install' -Wait
+      - name: Setup Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: '3.x'
+      - name: Install python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install meson ninja
+      - name: Install VapourSynth portable
+        run: |
+          curl -s -o vs.7z -LJO https://github.com/vapoursynth/vapoursynth/releases/download/R60/VapourSynth64-Portable-R60.7z
+          7z x vs.7z -ovs_portable -y
+      - name: Build
+        run: |
+          git submodule update --init --recursive --depth 1
+          meson build
+          ninja -C build
+        env:
+          VULKAN_SDK: C:\VulkanSDK\1.3.275.0
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: librife_windows_x86-64
+          path: build/rife.dll
