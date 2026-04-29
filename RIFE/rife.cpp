@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <vector>
 #include "benchmark.h"
 
@@ -367,6 +369,61 @@ int RIFE::load(const std::string& modeldir)
     return 0;
 }
 
+static float convert_fp16_to_float32(const uint16_t value)
+{
+    const uint32_t sign = static_cast<uint32_t>(value & 0x8000u) << 16;
+    const uint32_t exponent = (value >> 10) & 0x1fu;
+    const uint32_t mantissa = value & 0x03ffu;
+    uint32_t bits{};
+
+    if (exponent == 0)
+    {
+        if (mantissa == 0)
+        {
+            bits = sign;
+        }
+        else
+        {
+            auto normalized_mantissa = mantissa;
+            int adjusted_exponent = -14;
+            while ((normalized_mantissa & 0x0400u) == 0)
+            {
+                normalized_mantissa <<= 1;
+                adjusted_exponent -= 1;
+            }
+
+            normalized_mantissa &= 0x03ffu;
+            bits = sign | (static_cast<uint32_t>(adjusted_exponent + 127) << 23) | (normalized_mantissa << 13);
+        }
+    }
+    else if (exponent == 0x1fu)
+    {
+        bits = sign | 0x7f800000u | (mantissa << 13);
+    }
+    else
+    {
+        bits = sign | ((exponent + 112u) << 23) | (mantissa << 13);
+    }
+
+    float result;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+static float read_ncnn_scalar(const unsigned char* const data, const size_t index, const int scalar_size)
+{
+    if (scalar_size == static_cast<int>(sizeof(float)))
+    {
+        float value;
+        std::memcpy(&value, data + index * sizeof(float), sizeof(value));
+        return value;
+    }
+
+    uint16_t value;
+    std::memcpy(&value, data + index * sizeof(uint16_t), sizeof(value));
+    return convert_fp16_to_float32(value);
+}
+
 static float sample_bilinear_channel(const float* const data, const int w, const int h, float x, float y)
 {
     x = std::max(0.0f, std::min(x, static_cast<float>(w - 1)));
@@ -514,22 +571,29 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
     cmd.submit_and_wait();
 
     ncnn::Mat flow_cpu_unpacked;
-    if (flow_cpu.elempack != 1)
+    const auto scalar_size = flow_cpu.elempack > 0 ? static_cast<int>(flow_cpu.elemsize / flow_cpu.elempack) : 0;
+    if (flow_cpu.elempack < 1 || (scalar_size != static_cast<int>(sizeof(float)) && scalar_size != static_cast<int>(sizeof(uint16_t))))
     {
-        // Manually unpack interleaved elempack>1 mat to elempack=1.
-        // NCNN packed layout: channel(cg)[pixel_index * elempack + ep_idx] = channel cg*elempack+ep_idx at that pixel.
+        vkdev->reclaim_blob_allocator(blob_vkallocator);
+        vkdev->reclaim_staging_allocator(staging_vkallocator);
+        return -1;
+    }
+
+    if (flow_cpu.elempack != 1 || scalar_size != static_cast<int>(sizeof(float)))
+    {
         const int ep = flow_cpu.elempack;
         const int actual_c = flow_cpu.c * ep;
         flow_cpu_unpacked.create(flow_cpu.w, flow_cpu.h, actual_c, sizeof(float));
+        const auto pixel_count = static_cast<size_t>(flow_cpu.w) * flow_cpu.h;
         for (int cg = 0; cg < flow_cpu.c; cg++)
         {
-            const auto* packed = static_cast<const float*>(flow_cpu.channel(cg));
+            const auto* packed = static_cast<const unsigned char*>(flow_cpu.channel(cg));
             for (int ep_idx = 0; ep_idx < ep; ep_idx++)
             {
                 auto* dst = static_cast<float*>(flow_cpu_unpacked.channel(cg * ep + ep_idx));
-                for (int i = 0; i < flow_cpu.w * flow_cpu.h; i++)
+                for (size_t i = 0; i < pixel_count; i++)
                 {
-                    dst[i] = packed[static_cast<size_t>(i) * ep + ep_idx];
+                    dst[i] = read_ncnn_scalar(packed, i * ep + ep_idx, scalar_size);
                 }
             }
         }
