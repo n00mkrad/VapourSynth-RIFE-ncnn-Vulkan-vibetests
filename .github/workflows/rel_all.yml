@@ -1,0 +1,271 @@
+name: Release
+on:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      APPNAME: ${{ steps.get_appname.outputs.APPNAME }}
+      VERSION: ${{ steps.get_version.outputs.VERSION }}
+    steps:
+      - name: Get app name
+        id: get_appname
+        run: echo ::set-output name=APPNAME::${{ github.event.repository.name }}
+      - name: Get version
+        id: get_version
+        run: echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\//}
+
+  create-release:
+    needs:
+      - setup
+    name: Create Relase
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Create release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.setup.outputs.VERSION }}
+          release_name: Release ${{ needs.setup.outputs.VERSION }}
+          draft: true
+          prerelease: false
+
+  Ubuntu:
+    needs: [setup, create-release]
+    runs-on: ubuntu-22.04
+    env:
+      CC: gcc-12
+      CXX: g++-12
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Install GCC 12
+      run: |
+        sudo apt-get update
+        sudo apt-get install g++-12
+    - name: Setup Python
+      uses: actions/setup-python@v3
+      with:
+        python-version: '3.x' # Version range or exact version of a Python version to use, using SemVer's version range syntax
+
+    - name: Install meson
+      run: |
+        python -m pip install --upgrade pip
+        pip install meson
+    - name: Install ninja
+      run: sudo apt-get install ninja-build
+
+    - name: Install zimg
+      run: git clone https://github.com/sekrit-twc/zimg --depth 1 --recurse-submodules --shallow-submodules && cd zimg && ./autogen.sh && CFLAGS=-fPIC CXXFLAGS=-fPIC ./configure --enable-static --disable-shared && make -j$(nproc) && sudo make install
+        
+    - name: Install VapourSynth
+      run: |
+        git clone https://github.com/vapoursynth/vapoursynth --depth 1 --branch R65
+        pushd vapoursynth
+        ./autogen.sh
+        ./configure --disable-static --disable-x86-asm --disable-vsscript --disable-vspipe --disable-python-module
+        make -j2
+        sudo make install -j2
+        popd
+        rm -rf vapoursynth
+    - name: Install glslang
+      run: sudo apt-get install glslang-dev
+
+    - name: Install libvulkan
+      run: sudo apt-get install libvulkan-dev
+
+    - name: Install ncnn
+      run: |
+        git clone https://github.com/Tencent/ncnn --depth 1
+        pushd ncnn
+        cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/usr/local -DNCNN_BUILD_BENCHMARK=OFF -DNCNN_BUILD_EXAMPLES=OFF -DNCNN_BUILD_TOOLS=OFF -DNCNN_SHARED_LIB=ON -DNCNN_SYSTEM_GLSLANG=ON -DNCNN_VULKAN=ON -DGLSLANG_TARGET_DIR=/usr/lib/x86_64-linux-gnu/cmake -G Ninja
+        ninja -C build
+        sudo ninja -C build install
+        popd
+        rm -rf ncnn
+    - name: Build
+      run: |
+        git submodule update --init --recursive --depth 1
+        meson build
+        ninja -C build
+    - name: Upload
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: build/librife.so
+        asset_name: librife_linux_x86-64.so
+        asset_content_type: application/octet-stream
+
+  macOS64:
+      needs: [setup, create-release]
+      runs-on: macos-13
+
+      env:
+        CC: /usr/local/opt/llvm/bin/clang
+        CXX: /usr/local/opt/llvm/bin/clang++
+
+      steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install automake 
+        run: |
+          export LDFLAGS="-L/usr/local/opt/libomp/lib"
+          export CPPFLAGS="-I/usr/local/opt/libomp/include"
+          brew update
+          brew install llvm@15 libomp automake ninja pkg-config molten-vk vulkan-headers vulkan-tools ncnn libtool
+  
+      - name: Setup Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: '3.x' # Version range or exact version of a Python version to use, using SemVer's version range syntax
+
+      - name: Install meson
+        run: |
+          python -m pip install --upgrade pip
+          pip install meson -U
+
+      - name: Install zimg
+        run: git clone https://github.com/sekrit-twc/zimg --depth 1 --recurse-submodules --shallow-submodules && cd zimg && CC=clang CXX=clang++ ./autogen.sh && CC=clang CXX=clang++ CFLAGS=-fPIC CXXFLAGS=-fPIC ./configure --enable-static --disable-shared && CC=clang CXX=clang++ make -j$(nproc) && sudo make install
+
+      - name: Install VapourSynth
+        run: |
+          git clone https://github.com/vapoursynth/vapoursynth --depth 1 --branch R65
+          pushd vapoursynth
+          CC=clang CXX=clang++ ./autogen.sh
+          CC=clang CXX=clang++ ./configure --disable-static --disable-x86-asm --disable-vsscript --disable-vspipe --disable-python-module
+          CC=clang CXX=clang++ make -j3
+          sudo make install -j3
+          popd
+          rm -rf vapoursynth
+
+      - name: Build
+        run: |
+          git submodule update --init --recursive --depth 1
+          PKG_CONFIG_PATH="$PWD/pkgconfig/" CC=clang CXX=clang++ meson build
+          CC=clang CXX=clang++ ninja -C build
+          
+      - name: Upload
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: build/librife.dylib
+          asset_name: librife_macos_x86-64.dylib
+          asset_content_type: application/octet-stream
+
+  macOSarm:
+      needs: [setup, create-release]
+      runs-on: macos-14
+
+      env:
+        CC: /usr/local/opt/llvm/bin/clang
+        CXX: /usr/local/opt/llvm/bin/clang++
+
+      steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install automake 
+        run: |
+          export LDFLAGS="-L/usr/local/opt/libomp/lib"
+          export CPPFLAGS="-I/usr/local/opt/libomp/include"
+          brew update
+          brew install llvm@15 libomp automake ninja pkg-config molten-vk vulkan-headers vulkan-tools ncnn libtool
+  
+      - name: Setup Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: '3.x' # Version range or exact version of a Python version to use, using SemVer's version range syntax
+
+      - name: Install meson
+        run: |
+          python -m pip install --upgrade pip
+          pip install meson -U
+
+      - name: Install zimg
+        run: git clone https://github.com/sekrit-twc/zimg --depth 1 --recurse-submodules --shallow-submodules && cd zimg && CC=clang CXX=clang++ ./autogen.sh && CC=clang CXX=clang++ CFLAGS=-fPIC CXXFLAGS=-fPIC ./configure --enable-static --disable-shared && CC=clang CXX=clang++ make -j$(nproc) && sudo make install
+
+      - name: Install VapourSynth
+        run: |
+          git clone https://github.com/vapoursynth/vapoursynth --depth 1 --branch R65
+          pushd vapoursynth
+          CC=clang CXX=clang++ ./autogen.sh
+          CC=clang CXX=clang++ ./configure --disable-static --disable-x86-asm --disable-vsscript --disable-vspipe --disable-python-module
+          CC=clang CXX=clang++ make -j3
+          sudo make install -j3
+          popd
+          rm -rf vapoursynth
+
+      - name: Build
+        run: |
+          git submodule update --init --recursive --depth 1
+          PKG_CONFIG_PATH="$PWD/pkgconfig/" CC=clang CXX=clang++ meson build
+          CC=clang CXX=clang++ ninja -C build
+          
+      - name: Upload
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: build/librife.dylib
+          asset_name: librife_macos_arm64.dylib
+          asset_content_type: application/octet-stream
+
+  windows:
+    needs: [setup, create-release]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+      - uses: ilammy/msvc-dev-cmd@v1
+      # follows vulkan sdk in https://github.com/AmusementClub/ncnn/blob/github-actions/.github/workflows/windows-x64-gpu.yml
+      - name: Setup Vulkan SDK
+        shell: pwsh
+        run: |
+          $url = 'https://sdk.lunarg.com/sdk/download/1.3.275.0/windows/VulkanSDK-1.3.275.0-Installer.exe'
+          $installerFile = 'VulkanSDK-1.3.275.0-Installer.exe'
+          Invoke-WebRequest -Uri $url -OutFile $installerFile
+          Start-Process -FilePath $installerFile -ArgumentList '--accept-licenses', '--default-answer', '--confirm-command', 'install' -Wait
+      - name: Setup Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: '3.x'
+      - name: Install python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install meson ninja
+      - name: Install VapourSynth portable
+        run: |
+          curl -s -o vs.7z -LJO https://github.com/vapoursynth/vapoursynth/releases/download/R60/VapourSynth64-Portable-R60.7z
+          7z x vs.7z -ovs_portable -y
+      - name: Build
+        run: |
+          git submodule update --init --recursive --depth 1
+          meson build
+          ninja -C build
+        env:
+          VULKAN_SDK: C:\VulkanSDK\1.3.275.0
+      - name: Upload
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: build/rife.dll
+          asset_name: librife_windows_x86-64.dll
+          asset_content_type: application/octet-stream
