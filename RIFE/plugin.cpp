@@ -417,10 +417,13 @@ static void VS_CC rifeFree(void* instanceData, [[maybe_unused]] VSCore* core, co
 
 static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void* userData, VSCore* core, const VSAPI* vsapi) {
     auto d{ std::make_unique<RIFEData>() };
+    VSNode* mvClip{};
 
     try {
         d->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
         d->vi = *vsapi->getVideoInfo(d->node);
+        VSVideoInfo mvClipVi{};
+        bool hasMVClip{};
         int err;
 
         if (!vsh::isConstantVideoFormat(&d->vi) ||
@@ -480,6 +483,7 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
         if (err)
             mvPel = 1;
         auto mvBits{ vsapi->mapGetIntSaturated(in, "mv_bits", 0, &err) };
+        const auto mvBitsSpecified = !err;
         if (err)
             mvBits = 8;
         auto mvHPadding{ vsapi->mapGetIntSaturated(in, "mv_hpad", 0, &err) };
@@ -492,6 +496,11 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
         if (err)
             mvBlockReduce = MVBlockReduceCenter;
         d->mvUseChroma = !!vsapi->mapGetInt(in, "mv_chroma", 0, &err);
+        mvClip = vsapi->mapGetNode(in, "mv_clip", 0, &err);
+        if (!err) {
+            mvClipVi = *vsapi->getVideoInfo(mvClip);
+            hasMVClip = true;
+        }
         d->sceneChange = !!vsapi->mapGetInt(in, "sc", 0, &err);
         d->skip = !!vsapi->mapGetInt(in, "skip", 0, &err);
 
@@ -507,6 +516,17 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
 
         if (factorDen < 1)
             throw "factor_den must be at least 1";
+
+        if (hasMVClip) {
+            if (!vsh::isConstantVideoFormat(&mvClipVi))
+                throw "mv_clip must have a constant format";
+
+            if (mvClipVi.width != d->vi.width || mvClipVi.height != d->vi.height)
+                throw "mv_clip dimensions must match clip";
+
+            if (!mvBitsSpecified)
+                mvBits = mvClipVi.format.bitsPerSample;
+        }
 
         if (fpsNum && fpsDen && !(d->vi.fpsNum && d->vi.fpsDen))
             throw "clip does not have a valid frame rate and hence fps_num and fps_den cannot be used";
@@ -893,6 +913,8 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             d->mvBlkY = computeBlockCount(d->vi.height, d->mvBlockSize, d->mvOverlap, d->mvVPadding);
             d->mvBlockReduce = mvBlockReduce;
             d->mvInvalidSad = static_cast<int64_t>(d->mvBlockSize) * d->mvBlockSize * (1LL << d->mvBits);
+            const auto xRatioUV = hasMVClip ? 1 << mvClipVi.format.subSamplingW : 1 << d->vi.format.subSamplingW;
+            const auto yRatioUV = hasMVClip ? 1 << mvClipVi.format.subSamplingH : 1 << d->vi.format.subSamplingH;
             d->mvAnalysisData = {};
             d->mvAnalysisData.nVersion = 5;
             d->mvAnalysisData.nBlkSizeX = d->mvBlockSize;
@@ -911,13 +933,18 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             d->mvAnalysisData.nBlkX = d->mvBlkX;
             d->mvAnalysisData.nBlkY = d->mvBlkY;
             d->mvAnalysisData.bitsPerSample = d->mvBits;
-            d->mvAnalysisData.yRatioUV = 1;
-            d->mvAnalysisData.xRatioUV = 1;
+            d->mvAnalysisData.yRatioUV = yRatioUV;
+            d->mvAnalysisData.xRatioUV = xRatioUV;
             d->mvAnalysisData.nHPadding = d->mvHPadding;
             d->mvAnalysisData.nVPadding = d->mvVPadding;
 
             if (!vsapi->getVideoFormatByID(&d->vi.format, pfGray8, core))
                 throw "failed to create mv=True output format";
+        }
+
+        if (mvClip) {
+            vsapi->freeNode(mvClip);
+            mvClip = nullptr;
         }
 
         d->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
@@ -1015,6 +1042,7 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
         vsapi->mapSetError(out, ("RIFE: "s + error).c_str());
         vsapi->freeNode(d->node);
         vsapi->freeNode(d->psnr);
+        vsapi->freeNode(mvClip);
 
         if (--numGPUInstances == 0)
             ncnn::destroy_gpu_instance();
@@ -1053,6 +1081,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "mv_overlap:int:opt;"
                              "mv_pel:int:opt;"
                              "mv_bits:int:opt;"
+                             "mv_clip:vnode:opt;"
                              "mv_hpad:int:opt;"
                              "mv_vpad:int:opt;"
                              "mv_block_reduce:int:opt;"
