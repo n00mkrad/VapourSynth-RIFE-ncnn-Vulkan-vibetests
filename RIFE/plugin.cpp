@@ -47,6 +47,8 @@ namespace {
 
 constexpr auto MVToolsAnalysisDataKey = "MVTools_MVAnalysisData";
 constexpr auto MVToolsVectorsKey = "MVTools_vectors";
+constexpr auto RIFEMVBackwardVectorsInternalKey = "_RIFEMVBackwardVectors";
+constexpr auto RIFEMVForwardVectorsInternalKey = "_RIFEMVForwardVectors";
 constexpr int MotionIsBackward = 0x00000002;
 constexpr int MotionUseChromaMotion = 0x00000008;
 constexpr int MVBlockReduceCenter = 0;
@@ -84,6 +86,31 @@ struct MVAnalysisData final {
     int nVPadding;
 };
 
+struct MotionVectorConfig final {
+    bool useChroma;
+    int blockSize;
+    int overlap;
+    int stepX;
+    int stepY;
+    int pel;
+    int bits;
+    int hPadding;
+    int vPadding;
+    int blkX;
+    int blkY;
+    int blockReduce;
+    int64_t invalidSad;
+    MVAnalysisData backwardAnalysisData;
+    MVAnalysisData forwardAnalysisData;
+};
+
+struct ResolvedRIFEModel final {
+    std::string modelPath;
+    int padding;
+    bool rifeV2;
+    bool rifeV4;
+};
+
 static_assert(sizeof(MVArraySizeType) == 4);
 static_assert(sizeof(MVToolsVector) == 16);
 static_assert(sizeof(MVAnalysisData) == 84);
@@ -109,6 +136,59 @@ static int clampMotionVectorComponent(const int value, const int pel, const int 
     const auto maxPixelDelta = size - blockSize + padding - blockCoord;
 
     return std::clamp(value, minPixelDelta * pel, maxPixelDelta * pel);
+}
+
+static MotionVectorConfig createMotionVectorConfig(const VSVideoInfo& inputVi, const VSVideoInfo* const metadataVi,
+                                                   const bool useChroma, const int blockSize, const int overlap,
+                                                   const int pel, const int bits, const int hPadding,
+                                                   const int vPadding, const int blockReduce) noexcept {
+    MotionVectorConfig config{};
+    config.useChroma = useChroma;
+    config.blockSize = blockSize;
+    config.overlap = overlap;
+    config.stepX = blockSize - overlap;
+    config.stepY = blockSize - overlap;
+    config.pel = pel;
+    config.bits = bits;
+    config.hPadding = hPadding;
+    config.vPadding = vPadding;
+    config.blkX = computeBlockCount(inputVi.width, blockSize, overlap, hPadding);
+    config.blkY = computeBlockCount(inputVi.height, blockSize, overlap, vPadding);
+    config.blockReduce = blockReduce;
+    config.invalidSad = static_cast<int64_t>(blockSize) * blockSize * (1LL << bits);
+
+    const auto& analysisVi = metadataVi ? *metadataVi : inputVi;
+    const auto xRatioUV = 1 << analysisVi.format.subSamplingW;
+    const auto yRatioUV = 1 << analysisVi.format.subSamplingH;
+    const auto makeAnalysisData = [&](const bool backward) {
+        MVAnalysisData analysisData{};
+        analysisData.nVersion = 5;
+        analysisData.nBlkSizeX = config.blockSize;
+        analysisData.nBlkSizeY = config.blockSize;
+        analysisData.nPel = config.pel;
+        analysisData.nLvCount = 1;
+        analysisData.nDeltaFrame = 1;
+        analysisData.isBackward = backward ? 1 : 0;
+        analysisData.nMotionFlags = backward ? MotionIsBackward : 0;
+        if (config.useChroma)
+            analysisData.nMotionFlags |= MotionUseChromaMotion;
+        analysisData.nWidth = inputVi.width;
+        analysisData.nHeight = inputVi.height;
+        analysisData.nOverlapX = config.overlap;
+        analysisData.nOverlapY = config.overlap;
+        analysisData.nBlkX = config.blkX;
+        analysisData.nBlkY = config.blkY;
+        analysisData.bitsPerSample = config.bits;
+        analysisData.yRatioUV = yRatioUV;
+        analysisData.xRatioUV = xRatioUV;
+        analysisData.nHPadding = config.hPadding;
+        analysisData.nVPadding = config.vPadding;
+        return analysisData;
+    };
+
+    config.backwardAnalysisData = makeAnalysisData(true);
+    config.forwardAnalysisData = makeAnalysisData(false);
+    return config;
 }
 
 } // namespace
@@ -139,6 +219,7 @@ struct RIFEData final {
     int mvBlockReduce;
     int64_t mvInvalidSad;
     MVAnalysisData mvAnalysisData;
+    MotionVectorConfig mvConfig;
     std::unique_ptr<RIFE> rife;
     std::unique_ptr<std::counting_semaphore<>> semaphore;
 };
