@@ -103,17 +103,6 @@ static int clampPixel(const int value, const int limit) noexcept {
     return std::clamp(value, 0, limit - 1);
 }
 
-static float reduceBlockFlow(const float* flowPlane, const int width, const int height,
-                                                         const int blockX, const int blockY, const RIFEData* const VS_RESTRICT d) noexcept;
-
-static int64_t computeBlockSAD(const VSFrame* current, const VSFrame* reference, const int pixelDx, const int pixelDy,
-                               const int blockX, const int blockY, const int width, const int height,
-                                                             const RIFEData* const VS_RESTRICT d, const VSAPI* vsapi) noexcept;
-
-static std::vector<char> buildMVToolsVectorBlob(const VSFrame* current, const VSFrame* reference, const float* flow,
-                                                                                                const bool valid, const RIFEData* const VS_RESTRICT d,
-                                                const VSAPI* vsapi);
-
 } // namespace
 
 struct RIFEData final {
