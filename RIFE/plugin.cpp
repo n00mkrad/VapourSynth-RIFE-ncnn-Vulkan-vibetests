@@ -739,8 +739,16 @@ static const VSFrame* VS_CC rifeMVOutputGetFrame(int n, int activationReason, vo
     const auto pairIndex = d->backward ? n : n - 1;
 
     if (activationReason == arInitial) {
-        if (pairIndex >= 0 && pairIndex < d->vi.numFrames)
+        if (pairIndex >= 0 && pairIndex < d->vi.numFrames) {
             vsapi->requestFrameFilter(pairIndex, d->node, frameCtx);
+        } else {
+            auto dst = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, nullptr, core);
+            zeroMotionVectorFrame(dst, d->vi, vsapi);
+            auto props = vsapi->getFramePropertiesRW(dst);
+            vsapi->mapSetData(props, MVToolsAnalysisDataKey, reinterpret_cast<const char*>(&d->analysisData), sizeof(d->analysisData), dtBinary, maReplace);
+            vsapi->mapSetData(props, MVToolsVectorsKey, d->invalidBlob.data(), static_cast<int>(d->invalidBlob.size()), dtBinary, maReplace);
+            return dst;
+        }
     } else if (activationReason == arAllFramesReady) {
         const VSFrame* pairFrame{};
         if (pairIndex >= 0 && pairIndex < d->vi.numFrames)
