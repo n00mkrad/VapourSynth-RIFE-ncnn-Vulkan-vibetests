@@ -191,6 +191,131 @@ static MotionVectorConfig createMotionVectorConfig(const VSVideoInfo& inputVi, c
     return config;
 }
 
+static ResolvedRIFEModel resolveRIFEModel(const int model, std::string modelPath, VSCore* core, const VSAPI* vsapi) {
+    ResolvedRIFEModel resolved{};
+    resolved.modelPath = std::move(modelPath);
+    resolved.padding = 32;
+
+    if (resolved.modelPath.empty()) {
+        std::string pluginPath{ vsapi->getPluginPath(vsapi->getPluginByID("com.holywu.rife", core)) };
+        resolved.modelPath = pluginPath.substr(0, pluginPath.rfind('/')) + "/models";
+
+        switch (model) {
+        case 0: resolved.modelPath += "/rife"; break;
+        case 1: resolved.modelPath += "/rife-HD"; break;
+        case 2: resolved.modelPath += "/rife-UHD"; break;
+        case 3: resolved.modelPath += "/rife-anime"; break;
+        case 4: resolved.modelPath += "/rife-v2"; break;
+        case 5: resolved.modelPath += "/rife-v2.3"; break;
+        case 6: resolved.modelPath += "/rife-v2.4"; break;
+        case 7: resolved.modelPath += "/rife-v3.0"; break;
+        case 8: resolved.modelPath += "/rife-v3.1"; break;
+        case 9: resolved.modelPath += "/rife-v3.9_ensembleFalse_fastTrue"; break;
+        case 10: resolved.modelPath += "/rife-v3.9_ensembleTrue_fastFalse"; break;
+        case 11: resolved.modelPath += "/rife-v4_ensembleFalse_fastTrue"; break;
+        case 12: resolved.modelPath += "/rife-v4_ensembleTrue_fastFalse"; break;
+        case 13: resolved.modelPath += "/rife-v4.1_ensembleFalse_fastTrue"; break;
+        case 14: resolved.modelPath += "/rife-v4.1_ensembleTrue_fastFalse"; break;
+        case 15: resolved.modelPath += "/rife-v4.2_ensembleFalse_fastTrue"; break;
+        case 16: resolved.modelPath += "/rife-v4.2_ensembleTrue_fastFalse"; break;
+        case 17: resolved.modelPath += "/rife-v4.3_ensembleFalse_fastTrue"; break;
+        case 18: resolved.modelPath += "/rife-v4.3_ensembleTrue_fastFalse"; break;
+        case 19: resolved.modelPath += "/rife-v4.4_ensembleFalse_fastTrue"; break;
+        case 20: resolved.modelPath += "/rife-v4.4_ensembleTrue_fastFalse"; break;
+        case 21: resolved.modelPath += "/rife-v4.5_ensembleFalse"; break;
+        case 22: resolved.modelPath += "/rife-v4.5_ensembleTrue"; break;
+        case 23: resolved.modelPath += "/rife-v4.6_ensembleFalse"; break;
+        case 24: resolved.modelPath += "/rife-v4.6_ensembleTrue"; break;
+        case 25: resolved.modelPath += "/rife-v4.7_ensembleFalse"; break;
+        case 26: resolved.modelPath += "/rife-v4.7_ensembleTrue"; break;
+        case 27: resolved.modelPath += "/rife-v4.8_ensembleFalse"; break;
+        case 28: resolved.modelPath += "/rife-v4.8_ensembleTrue"; break;
+        case 29: resolved.modelPath += "/rife-v4.9_ensembleFalse"; break;
+        case 30: resolved.modelPath += "/rife-v4.9_ensembleTrue"; break;
+        case 31: resolved.modelPath += "/rife-v4.10_ensembleFalse"; break;
+        case 32: resolved.modelPath += "/rife-v4.10_ensembleTrue"; break;
+        case 33: resolved.modelPath += "/rife-v4.11_ensembleFalse"; break;
+        case 34: resolved.modelPath += "/rife-v4.11_ensembleTrue"; break;
+        case 35: resolved.modelPath += "/rife-v4.12_ensembleFalse"; break;
+        case 36: resolved.modelPath += "/rife-v4.12_ensembleTrue"; break;
+        case 37: resolved.modelPath += "/rife-v4.12_lite_ensembleFalse"; break;
+        case 38: resolved.modelPath += "/rife-v4.12_lite_ensembleTrue"; break;
+        case 39: resolved.modelPath += "/rife-v4.13_ensembleFalse"; break;
+        case 40: resolved.modelPath += "/rife-v4.13_ensembleTrue"; break;
+        case 41: resolved.modelPath += "/rife-v4.13_lite_ensembleFalse"; break;
+        case 42: resolved.modelPath += "/rife-v4.13_lite_ensembleTrue"; break;
+        case 43: resolved.modelPath += "/rife-v4.14_ensembleFalse"; break;
+        case 44: resolved.modelPath += "/rife-v4.14_ensembleTrue"; break;
+        case 45: resolved.modelPath += "/rife-v4.14_lite_ensembleFalse"; break;
+        case 46: resolved.modelPath += "/rife-v4.14_lite_ensembleTrue"; break;
+        case 47: resolved.modelPath += "/rife-v4.15_ensembleFalse"; break;
+        case 48: resolved.modelPath += "/rife-v4.15_ensembleTrue"; break;
+        case 49: resolved.modelPath += "/rife-v4.15_lite_ensembleFalse"; break;
+        case 50: resolved.modelPath += "/rife-v4.15_lite_ensembleTrue"; break;
+        case 51: resolved.modelPath += "/rife-v4.16_lite_ensembleFalse"; break;
+        case 52: resolved.modelPath += "/rife-v4.16_lite_ensembleTrue"; break;
+        case 53: resolved.modelPath += "/rife-v4.17_ensembleFalse"; break;
+        case 54: resolved.modelPath += "/rife-v4.17_ensembleTrue"; break;
+        case 55: resolved.modelPath += "/rife-v4.17_lite_ensembleFalse"; break;
+        case 56: resolved.modelPath += "/rife-v4.17_lite_ensembleTrue"; break;
+        case 57: resolved.modelPath += "/rife-v4.18_ensembleFalse"; break;
+        case 58: resolved.modelPath += "/rife-v4.18_ensembleTrue"; break;
+        case 59: resolved.modelPath += "/rife-v4.19_beta_ensembleFalse"; break;
+        case 60: resolved.modelPath += "/rife-v4.19_beta_ensembleTrue"; break;
+        case 61: resolved.modelPath += "/rife-v4.20_ensembleFalse"; break;
+        case 62: resolved.modelPath += "/rife-v4.20_ensembleTrue"; break;
+        case 63: resolved.modelPath += "/rife-v4.21_ensembleFalse"; break;
+        case 64: resolved.modelPath += "/rife-v4.22_ensembleFalse"; break;
+        case 65: resolved.modelPath += "/rife-v4.22_lite_ensembleFalse"; break;
+        case 66: resolved.modelPath += "/rife-v4.23_beta_ensembleFalse"; break;
+        case 67: resolved.modelPath += "/rife-v4.24_ensembleFalse"; break;
+        case 68: resolved.modelPath += "/rife-v4.24_ensembleTrue"; break;
+        case 69: resolved.modelPath += "/rife-v4.25_ensembleFalse"; resolved.padding = 64; break;
+        case 70: resolved.modelPath += "/rife-v4.25-lite_ensembleFalse"; resolved.padding = 128; break;
+        case 71: resolved.modelPath += "/rife-v4.25_heavy_beta_ensembleFalse"; resolved.padding = 64; break;
+        case 72: resolved.modelPath += "/rife-v4.26_ensembleFalse"; resolved.padding = 64; break;
+        case 73: resolved.modelPath += "/rife-v4.26-large_ensembleFalse"; resolved.padding = 64; break;
+        }
+    }
+
+    std::ifstream ifs{ resolved.modelPath + "/flownet.param" };
+    if (!ifs.is_open())
+        throw "failed to load model";
+
+    if (resolved.modelPath.find("rife-v2") != std::string::npos)
+        resolved.rifeV2 = true;
+    else if (resolved.modelPath.find("rife-v3.9") != std::string::npos)
+        resolved.rifeV4 = true;
+    else if (resolved.modelPath.find("rife-v3") != std::string::npos)
+        resolved.rifeV2 = true;
+    else if (resolved.modelPath.find("rife-v4") != std::string::npos)
+        resolved.rifeV4 = true;
+    else if (resolved.modelPath.find("rife4") != std::string::npos)
+        resolved.rifeV4 = true;
+
+    if (resolved.modelPath.find("rife-v4.25") != std::string::npos)
+        resolved.padding = 64;
+    if (resolved.modelPath.find("rife-v4.25-lite") != std::string::npos)
+        resolved.padding = 128;
+    if (resolved.modelPath.find("rife-v4.26") != std::string::npos)
+        resolved.padding = 64;
+    else if (resolved.modelPath.find("rife") == std::string::npos)
+        throw "unknown model dir type";
+
+    return resolved;
+}
+
+static void loadRIFEModel(RIFE& rife, const std::string& modelPath) {
+#ifdef _WIN32
+    const auto bufferSize = MultiByteToWideChar(CP_UTF8, 0, modelPath.c_str(), -1, nullptr, 0);
+    std::vector<wchar_t> wbuffer(bufferSize);
+    MultiByteToWideChar(CP_UTF8, 0, modelPath.c_str(), -1, wbuffer.data(), bufferSize);
+    rife.load(wbuffer.data());
+#else
+    rife.load(modelPath);
+#endif
+}
+
 } // namespace
 
 struct RIFEData final {
@@ -222,6 +347,22 @@ struct RIFEData final {
     MotionVectorConfig mvConfig;
     std::unique_ptr<RIFE> rife;
     std::unique_ptr<std::counting_semaphore<>> semaphore;
+};
+
+struct RIFEMVPairData final {
+    VSNode* node;
+    VSVideoInfo vi;
+    MotionVectorConfig mvConfig;
+    std::unique_ptr<RIFE> rife;
+    std::unique_ptr<std::counting_semaphore<>> semaphore;
+};
+
+struct RIFEMVOutputData final {
+    VSNode* node;
+    VSVideoInfo vi;
+    MVAnalysisData analysisData;
+    std::vector<char> invalidBlob;
+    bool backward;
 };
 
 static float reduceBlockFlow(const float* flowPlane, const int width, const int height,
@@ -334,6 +475,43 @@ static std::vector<char> buildMVToolsVectorBlob(const VSFrame* current, const VS
     std::memcpy(blob.data() + offset, vectors.data(), vectors.size() * sizeof(MVToolsVector));
 
     return blob;
+}
+
+static RIFEData makeMotionVectorBuilderData(const MotionVectorConfig& config, const bool backward) {
+    RIFEData d{};
+    d.mvBackward = backward;
+    d.mvUseChroma = config.useChroma;
+    d.mvBlockSize = config.blockSize;
+    d.mvOverlap = config.overlap;
+    d.mvStepX = config.stepX;
+    d.mvStepY = config.stepY;
+    d.mvPel = config.pel;
+    d.mvBits = config.bits;
+    d.mvHPadding = config.hPadding;
+    d.mvVPadding = config.vPadding;
+    d.mvBlkX = config.blkX;
+    d.mvBlkY = config.blkY;
+    d.mvBlockReduce = config.blockReduce;
+    d.mvInvalidSad = config.invalidSad;
+    return d;
+}
+
+static std::vector<char> buildMotionVectorBlobFromConfig(const VSFrame* current, const VSFrame* reference, const float* flow,
+                                                         const bool valid, const MotionVectorConfig& config,
+                                                         const bool backward, const VSAPI* vsapi) {
+    const auto d = makeMotionVectorBuilderData(config, backward);
+    return buildMVToolsVectorBlob(current, reference, flow, valid, &d, vsapi);
+}
+
+static std::vector<char> buildInvalidMotionVectorBlob(const MotionVectorConfig& config, const bool backward) {
+    return buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, false, config, backward, nullptr);
+}
+
+static void zeroMotionVectorFrame(VSFrame* frame, const VSVideoInfo& vi, const VSAPI* vsapi) {
+    auto* dstp = vsapi->getWritePtr(frame, 0);
+    const auto dstStride = vsapi->getStride(frame, 0);
+    for (auto y = 0; y < vi.height; y++)
+        std::memset(dstp + static_cast<size_t>(y) * dstStride, 0, vi.width * vi.format.bytesPerSample);
 }
 
 static void filter(const VSFrame* src0, const VSFrame* src1, VSFrame* dst,
@@ -494,6 +672,122 @@ static const VSFrame* VS_CC rifeGetFrame(int n, int activationReason, void* inst
     }
 
     return nullptr;
+}
+
+static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void* instanceData, [[maybe_unused]] void** frameData,
+                                               VSFrameContext* frameCtx, VSCore* core, const VSAPI* vsapi) {
+    auto d{ static_cast<const RIFEMVPairData*>(instanceData) };
+
+    if (activationReason == arInitial) {
+        vsapi->requestFrameFilter(n, d->node, frameCtx);
+        if (n + 1 < d->vi.numFrames)
+            vsapi->requestFrameFilter(n + 1, d->node, frameCtx);
+    } else if (activationReason == arAllFramesReady) {
+        auto current = vsapi->getFrameFilter(n, d->node, frameCtx);
+        const VSFrame* reference = n + 1 < d->vi.numFrames ? vsapi->getFrameFilter(n + 1, d->node, frameCtx) : nullptr;
+
+        auto dst = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, current, core);
+        zeroMotionVectorFrame(dst, d->vi, vsapi);
+        auto props = vsapi->getFramePropertiesRW(dst);
+
+        std::vector<char> backwardBlob;
+        std::vector<char> forwardBlob;
+        if (reference) {
+            const auto width = vsapi->getFrameWidth(current, 0);
+            const auto height = vsapi->getFrameHeight(current, 0);
+            const auto stride = vsapi->getStride(current, 0) / vsapi->getVideoFrameFormat(current)->bytesPerSample;
+            std::vector<float> flow(static_cast<size_t>(width) * height * 4);
+            const auto currentR = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 0));
+            const auto currentG = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 1));
+            const auto currentB = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 2));
+            const auto referenceR = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 0));
+            const auto referenceG = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 1));
+            const auto referenceB = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 2));
+
+            d->semaphore->acquire();
+            const auto status = d->rife->process_flow(currentR, currentG, currentB, referenceR, referenceG, referenceB, flow.data(), width, height, stride);
+            d->semaphore->release();
+            if (status != 0) {
+                vsapi->freeFrame(current);
+                vsapi->freeFrame(reference);
+                vsapi->freeFrame(dst);
+                vsapi->setFilterError("RIFEMV: failed to export motion vectors", frameCtx);
+                return nullptr;
+            }
+
+            backwardBlob = buildMotionVectorBlobFromConfig(current, reference, flow.data(), true, d->mvConfig, true, vsapi);
+            forwardBlob = buildMotionVectorBlobFromConfig(reference, current, flow.data(), true, d->mvConfig, false, vsapi);
+        } else {
+            backwardBlob = buildInvalidMotionVectorBlob(d->mvConfig, true);
+            forwardBlob = buildInvalidMotionVectorBlob(d->mvConfig, false);
+        }
+
+        vsapi->mapSetData(props, RIFEMVBackwardVectorsInternalKey, backwardBlob.data(), static_cast<int>(backwardBlob.size()), dtBinary, maReplace);
+        vsapi->mapSetData(props, RIFEMVForwardVectorsInternalKey, forwardBlob.data(), static_cast<int>(forwardBlob.size()), dtBinary, maReplace);
+
+        vsapi->freeFrame(current);
+        vsapi->freeFrame(reference);
+        return dst;
+    }
+
+    return nullptr;
+}
+
+static const VSFrame* VS_CC rifeMVOutputGetFrame(int n, int activationReason, void* instanceData, [[maybe_unused]] void** frameData,
+                                                 VSFrameContext* frameCtx, VSCore* core, const VSAPI* vsapi) {
+    auto d{ static_cast<const RIFEMVOutputData*>(instanceData) };
+    const auto pairIndex = d->backward ? n : n - 1;
+
+    if (activationReason == arInitial) {
+        if (pairIndex >= 0 && pairIndex < d->vi.numFrames)
+            vsapi->requestFrameFilter(pairIndex, d->node, frameCtx);
+    } else if (activationReason == arAllFramesReady) {
+        const VSFrame* pairFrame{};
+        if (pairIndex >= 0 && pairIndex < d->vi.numFrames)
+            pairFrame = vsapi->getFrameFilter(pairIndex, d->node, frameCtx);
+
+        VSFrame* dst{};
+        const char* vectorBlob = nullptr;
+        int vectorBlobSize{};
+        if (pairFrame) {
+            const auto pairProps = vsapi->getFramePropertiesRO(pairFrame);
+            const auto blobKey = d->backward ? RIFEMVBackwardVectorsInternalKey : RIFEMVForwardVectorsInternalKey;
+            vectorBlob = vsapi->mapGetData(pairProps, blobKey, 0, nullptr);
+            vectorBlobSize = vsapi->mapGetDataSize(pairProps, blobKey, 0, nullptr);
+            dst = vsapi->copyFrame(pairFrame, core);
+        } else {
+            dst = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, nullptr, core);
+            zeroMotionVectorFrame(dst, d->vi, vsapi);
+            vectorBlob = d->invalidBlob.data();
+            vectorBlobSize = static_cast<int>(d->invalidBlob.size());
+        }
+
+        auto props = vsapi->getFramePropertiesRW(dst);
+        vsapi->mapDeleteKey(props, RIFEMVBackwardVectorsInternalKey);
+        vsapi->mapDeleteKey(props, RIFEMVForwardVectorsInternalKey);
+        vsapi->mapSetData(props, MVToolsAnalysisDataKey, reinterpret_cast<const char*>(&d->analysisData), sizeof(d->analysisData), dtBinary, maReplace);
+        vsapi->mapSetData(props, MVToolsVectorsKey, vectorBlob, vectorBlobSize, dtBinary, maReplace);
+
+        vsapi->freeFrame(pairFrame);
+        return dst;
+    }
+
+    return nullptr;
+}
+
+static void VS_CC rifeMVPairFree(void* instanceData, [[maybe_unused]] VSCore* core, const VSAPI* vsapi) {
+    auto d{ static_cast<RIFEMVPairData*>(instanceData) };
+    vsapi->freeNode(d->node);
+    delete d;
+
+    if (--numGPUInstances == 0)
+        ncnn::destroy_gpu_instance();
+}
+
+static void VS_CC rifeMVOutputFree(void* instanceData, [[maybe_unused]] VSCore* core, const VSAPI* vsapi) {
+    auto d{ static_cast<RIFEMVOutputData*>(instanceData) };
+    vsapi->freeNode(d->node);
+    delete d;
 }
 
 static void VS_CC rifeFree(void* instanceData, [[maybe_unused]] VSCore* core, const VSAPI* vsapi) {
@@ -1148,46 +1442,199 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
 }
 
 static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void* userData, VSCore* core, const VSAPI* vsapi) {
-    auto* plugin = vsapi->getPluginByID("com.holywu.rife", core);
-    if (!plugin) {
-        vsapi->mapSetError(out, "RIFEMV: failed to find RIFE plugin");
+    auto pairData{ std::make_unique<RIFEMVPairData>() };
+    VSNode* mvClip{};
+    VSNode* pairNode{};
+    VSNode* backwardNode{};
+    VSNode* forwardNode{};
+    bool hasGPUInstance{};
+
+    try {
+        pairData->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
+        pairData->vi = *vsapi->getVideoInfo(pairData->node);
+        VSVideoInfo mvClipVi{};
+        bool hasMVClip{};
+        int err;
+
+        if (!vsh::isConstantVideoFormat(&pairData->vi) ||
+            pairData->vi.format.colorFamily != cfRGB ||
+            pairData->vi.format.sampleType != stFloat ||
+            pairData->vi.format.bitsPerSample != 32)
+            throw "only constant RGB format 32 bit float input supported";
+
+        if (ncnn::create_gpu_instance())
+            throw "failed to create GPU instance";
+        ++numGPUInstances;
+        hasGPUInstance = true;
+
+        auto model{ vsapi->mapGetIntSaturated(in, "model", 0, &err) };
+        if (err)
+            model = 5;
+
+        auto model_path{ vsapi->mapGetData(in, "model_path", 0, &err) };
+        std::string modelPath{ err ? "" : model_path };
+
+        auto gpuId{ vsapi->mapGetIntSaturated(in, "gpu_id", 0, &err) };
+        if (err)
+            gpuId = ncnn::get_default_gpu_index();
+
+        auto gpuThread{ vsapi->mapGetIntSaturated(in, "gpu_thread", 0, &err) };
+        if (err)
+            gpuThread = 2;
+
+        const auto uhd = !!vsapi->mapGetInt(in, "uhd", 0, &err);
+        auto mvBlockSize{ vsapi->mapGetIntSaturated(in, "mv_block_size", 0, &err) };
+        if (err)
+            mvBlockSize = 16;
+        auto mvOverlap{ vsapi->mapGetIntSaturated(in, "mv_overlap", 0, &err) };
+        if (err)
+            mvOverlap = 8;
+        auto mvPel{ vsapi->mapGetIntSaturated(in, "mv_pel", 0, &err) };
+        if (err)
+            mvPel = 1;
+        auto mvBits{ vsapi->mapGetIntSaturated(in, "mv_bits", 0, &err) };
+        const auto mvBitsSpecified = !err;
+        if (err)
+            mvBits = 8;
+        auto mvHPadding{ vsapi->mapGetIntSaturated(in, "mv_hpad", 0, &err) };
+        if (err)
+            mvHPadding = 0;
+        auto mvVPadding{ vsapi->mapGetIntSaturated(in, "mv_vpad", 0, &err) };
+        if (err)
+            mvVPadding = 0;
+        auto mvBlockReduce{ vsapi->mapGetIntSaturated(in, "mv_block_reduce", 0, &err) };
+        if (err)
+            mvBlockReduce = MVBlockReduceAverage;
+        const auto mvUseChroma = !!vsapi->mapGetInt(in, "mv_chroma", 0, &err);
+
+        mvClip = vsapi->mapGetNode(in, "mv_clip", 0, &err);
+        if (!err) {
+            mvClipVi = *vsapi->getVideoInfo(mvClip);
+            hasMVClip = true;
+        }
+
+        if (model < 0 || model > 76)
+            throw "model must be between 0 and 76 (inclusive)";
+
+        if (hasMVClip) {
+            if (!vsh::isConstantVideoFormat(&mvClipVi))
+                throw "mv_clip must have a constant format";
+
+            if (mvClipVi.width != pairData->vi.width || mvClipVi.height != pairData->vi.height)
+                throw "mv_clip dimensions must match clip";
+
+            if (!mvBitsSpecified)
+                mvBits = mvClipVi.format.bitsPerSample;
+        }
+
+        if (gpuId < 0 || gpuId >= ncnn::get_gpu_count())
+            throw "invalid GPU device";
+
+        if (auto queueCount{ ncnn::get_gpu_info(gpuId).compute_queue_count() }; static_cast<uint32_t>(gpuThread) > queueCount)
+            std::cerr << "Warning: gpu_thread is recommended to be between 1 and " << queueCount << " (inclusive)" << std::endl;
+
+        if (gpuThread < 1)
+            throw "gpu_thread must be greater than 0";
+
+        const auto resolvedModel = resolveRIFEModel(model, modelPath, core, vsapi);
+        if (resolvedModel.modelPath.find("rife-v3.1") == std::string::npos)
+            throw "RIFEMV currently requires the rife-v3.1 model";
+
+        if (mvBlockSize < 1)
+            throw "mv_block_size must be at least 1";
+
+        if (mvOverlap < 0 || mvOverlap >= mvBlockSize)
+            throw "mv_overlap must be between 0 and mv_block_size - 1";
+
+        if (mvPel < 1)
+            throw "mv_pel must be at least 1";
+
+        if (mvBits < 1 || mvBits > 16)
+            throw "mv_bits must be between 1 and 16 (inclusive)";
+
+        if (mvHPadding < 0 || mvVPadding < 0)
+            throw "mv_hpad and mv_vpad must be non-negative";
+
+        if (mvBlockReduce != MVBlockReduceCenter && mvBlockReduce != MVBlockReduceAverage)
+            throw "mv_block_reduce must be 0 (center) or 1 (average)";
+
+        pairData->mvConfig = createMotionVectorConfig(pairData->vi, hasMVClip ? &mvClipVi : nullptr,
+                                                      mvUseChroma, mvBlockSize, mvOverlap, mvPel,
+                                                      mvBits, mvHPadding, mvVPadding, mvBlockReduce);
+
+        if (!vsapi->getVideoFormatByID(&pairData->vi.format, pfGray8, core))
+            throw "failed to create RIFEMV output format";
+
+        if (mvClip) {
+            vsapi->freeNode(mvClip);
+            mvClip = nullptr;
+        }
+
+        pairData->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
+        pairData->rife = std::make_unique<RIFE>(gpuId, false, uhd, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding);
+        loadRIFEModel(*pairData->rife, resolvedModel.modelPath);
+    } catch (const char* error) {
+        vsapi->mapSetError(out, ("RIFEMV: "s + error).c_str());
+        vsapi->freeNode(pairData->node);
+        vsapi->freeNode(mvClip);
+
+        if (hasGPUInstance && --numGPUInstances == 0)
+            ncnn::destroy_gpu_instance();
         return;
     }
 
-    auto* args = vsapi->createMap();
-    auto* ret = static_cast<VSMap*>(nullptr);
-    VSNode* bwNode{};
-    VSNode* fwNode{};
-
-    vsapi->copyMap(in, args);
-    vsapi->mapSetInt(args, "mv", 1, maReplace);
-
-    vsapi->mapSetInt(args, "mv_backward", 1, maReplace);
-    ret = vsapi->invoke(plugin, "RIFE", args);
-    if (vsapi->mapGetError(ret)) {
-        vsapi->mapSetError(out, vsapi->mapGetError(ret));
-        vsapi->freeMap(ret);
-        vsapi->freeMap(args);
+    const auto outputVi = pairData->vi;
+    const auto mvConfig = pairData->mvConfig;
+    VSFilterDependency pairDeps[]{ { pairData->node, rpGeneral } };
+    pairNode = vsapi->createVideoFilter2("RIFEMVPair", &pairData->vi, rifeMVPairGetFrame, rifeMVPairFree, fmParallel,
+                                         pairDeps, 1, pairData.get(), core);
+    if (!pairNode) {
+        vsapi->mapSetError(out, "RIFEMV: failed to create internal pair filter");
+        vsapi->freeNode(pairData->node);
+        if (hasGPUInstance && --numGPUInstances == 0)
+            ncnn::destroy_gpu_instance();
         return;
     }
-    bwNode = vsapi->mapGetNode(ret, "clip", 0, nullptr);
-    vsapi->freeMap(ret);
+    pairData.release();
 
-    vsapi->mapSetInt(args, "mv_backward", 0, maReplace);
-    ret = vsapi->invoke(plugin, "RIFE", args);
-    if (vsapi->mapGetError(ret)) {
-        vsapi->mapSetError(out, vsapi->mapGetError(ret));
-        vsapi->freeNode(bwNode);
-        vsapi->freeMap(ret);
-        vsapi->freeMap(args);
+    auto backwardData = std::make_unique<RIFEMVOutputData>();
+    backwardData->node = vsapi->addNodeRef(pairNode);
+    backwardData->vi = outputVi;
+    backwardData->analysisData = mvConfig.backwardAnalysisData;
+    backwardData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, true);
+    backwardData->backward = true;
+    VSFilterDependency backwardDeps[]{ { backwardData->node, rpGeneral } };
+    backwardNode = vsapi->createVideoFilter2("RIFEMVBackward", &backwardData->vi, rifeMVOutputGetFrame, rifeMVOutputFree,
+                                             fmParallel, backwardDeps, 1, backwardData.get(), core);
+    if (!backwardNode) {
+        vsapi->mapSetError(out, "RIFEMV: failed to create backward output filter");
+        vsapi->freeNode(backwardData->node);
+        vsapi->freeNode(pairNode);
         return;
     }
-    fwNode = vsapi->mapGetNode(ret, "clip", 0, nullptr);
-    vsapi->freeMap(ret);
-    vsapi->freeMap(args);
+    backwardData.release();
 
-    vsapi->mapConsumeNode(out, "clip", bwNode, maAppend);
-    vsapi->mapConsumeNode(out, "clip", fwNode, maAppend);
+    auto forwardData = std::make_unique<RIFEMVOutputData>();
+    forwardData->node = vsapi->addNodeRef(pairNode);
+    forwardData->vi = outputVi;
+    forwardData->analysisData = mvConfig.forwardAnalysisData;
+    forwardData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, false);
+    forwardData->backward = false;
+    VSFilterDependency forwardDeps[]{ { forwardData->node, rpGeneral } };
+    forwardNode = vsapi->createVideoFilter2("RIFEMVForward", &forwardData->vi, rifeMVOutputGetFrame, rifeMVOutputFree,
+                                            fmParallel, forwardDeps, 1, forwardData.get(), core);
+    if (!forwardNode) {
+        vsapi->mapSetError(out, "RIFEMV: failed to create forward output filter");
+        vsapi->freeNode(forwardData->node);
+        vsapi->freeNode(backwardNode);
+        vsapi->freeNode(pairNode);
+        return;
+    }
+    forwardData.release();
+
+    vsapi->freeNode(pairNode);
+    vsapi->mapConsumeNode(out, "clip", backwardNode, maAppend);
+    vsapi->mapConsumeNode(out, "clip", forwardNode, maAppend);
 }
 
 //////////////////////////////////////////
