@@ -783,7 +783,9 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             gpuThread = 2;
 
         auto tta{ !!vsapi->mapGetInt(in, "tta", 0, &err) };
-        auto uhd{ !!vsapi->mapGetInt(in, "uhd", 0, &err) };
+        auto flowScale{ static_cast<float>(vsapi->mapGetFloat(in, "flow_scale", 0, &err)) };
+        if (err)
+            flowScale = 1.f;
         d->exportMotionVectors = !!vsapi->mapGetInt(in, "mv", 0, &err);
         d->mvBackward = !!vsapi->mapGetInt(in, "mv_backward", 0, &err);
         if (err)
@@ -854,6 +856,9 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
         
         if (auto queueCount{ ncnn::get_gpu_info(gpuId).compute_queue_count() }; gpuThread < 1)
             throw "gpu_thread must be greater than 0";
+
+        if (!std::isfinite(flowScale) || flowScale <= 0.f)
+            throw "flow_scale must be greater than 0";
 
         
         if (d->skipThreshold < 0 || d->skipThreshold > 60)
@@ -1033,7 +1038,7 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             vsapi->freeMap(ret);
         }
 
-        d->rife = std::make_unique<RIFE>(gpuId, tta, uhd, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding);
+        d->rife = std::make_unique<RIFE>(gpuId, tta, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding);
         loadRIFEModel(*d->rife, resolvedModel.modelPath);
     } catch (const char* error) {
         vsapi->mapSetError(out, ("RIFE: "s + error).c_str());
@@ -1090,7 +1095,9 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         if (err)
             gpuThread = 2;
 
-        const auto uhd = !!vsapi->mapGetInt(in, "uhd", 0, &err);
+        auto flowScale{ static_cast<float>(vsapi->mapGetFloat(in, "flow_scale", 0, &err)) };
+        if (err)
+            flowScale = 1.f;
         auto mvBlockSize{ vsapi->mapGetIntSaturated(in, "mv_block_size", 0, &err) };
         if (err)
             mvBlockSize = 16;
@@ -1144,6 +1151,9 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         if (gpuThread < 1)
             throw "gpu_thread must be greater than 0";
 
+        if (!std::isfinite(flowScale) || flowScale <= 0.f)
+            throw "flow_scale must be greater than 0";
+
         const auto resolvedModel = resolveRIFEModel(modelPath);
         if (resolvedModel.modelPath.find("rife-v3.1") == std::string::npos)
             throw "RIFEMV currently requires the rife-v3.1 model";
@@ -1182,7 +1192,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         }
 
         pairData->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
-        pairData->rife = std::make_unique<RIFE>(gpuId, false, uhd, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding);
+        pairData->rife = std::make_unique<RIFE>(gpuId, false, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding);
         loadRIFEModel(*pairData->rife, resolvedModel.modelPath);
     } catch (const char* error) {
         vsapi->mapSetError(out, ("RIFEMV: "s + error).c_str());
@@ -1265,7 +1275,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "gpu_id:int:opt;"
                              "gpu_thread:int:opt;"
                              "tta:int:opt;"
-                             "uhd:int:opt;"
+                             "flow_scale:float:opt;"
                              "mv:int:opt;"
                              "mv_backward:int:opt;"
                              "mv_block_size:int:opt;"
@@ -1289,7 +1299,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "model_path:data;"
                              "gpu_id:int:opt;"
                              "gpu_thread:int:opt;"
-                             "uhd:int:opt;"
+                             "flow_scale:float:opt;"
                              "mv_block_size:int:opt;"
                              "mv_overlap:int:opt;"
                              "mv_pel:int:opt;"

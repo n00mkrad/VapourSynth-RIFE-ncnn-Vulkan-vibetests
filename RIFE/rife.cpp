@@ -25,7 +25,7 @@
 
 DEFINE_LAYER_CREATOR(Warp)
 
-RIFE::RIFE(int gpuid, bool _tta_mode, bool _uhd_mode, int _num_threads, bool _rife_v2, bool _rife_v4, int _padding)
+RIFE::RIFE(int gpuid, bool _tta_mode, float _flow_scale, int _num_threads, bool _rife_v2, bool _rife_v4, int _padding)
 {
     vkdev = gpuid == -1 ? 0 : ncnn::get_gpu_device(gpuid);
 
@@ -35,13 +35,15 @@ RIFE::RIFE(int gpuid, bool _tta_mode, bool _uhd_mode, int _num_threads, bool _ri
     rife_flow_tta_temporal_avg = 0;
     rife_out_tta_temporal_avg = 0;
     rife_v4_timestep = 0;
-    rife_uhd_downscale_image = 0;
-    rife_uhd_upscale_flow = 0;
-    rife_uhd_double_flow = 0;
+    rife_flow_scale_image = 0;
+    rife_flow_resize_flow = 0;
+    rife_flow_scale_vectors = 0;
     rife_v2_slice_flow = 0;
     tta_mode = _tta_mode;
     tta_temporal_mode = false;
-    uhd_mode = _uhd_mode;
+    use_flow_scale = std::abs(_flow_scale - 1.f) > 1e-6f;
+    flow_scale = _flow_scale;
+    flow_scale_inv = 1.f / _flow_scale;
     num_threads = _num_threads;
     rife_v2 = _rife_v2;
     rife_v4 = _rife_v4;
@@ -60,16 +62,16 @@ RIFE::~RIFE()
         delete rife_v4_timestep;
     }
 
-    if (uhd_mode)
+    if (use_flow_scale)
     {
-        rife_uhd_downscale_image->destroy_pipeline(flownet.opt);
-        delete rife_uhd_downscale_image;
+        rife_flow_scale_image->destroy_pipeline(flownet.opt);
+        delete rife_flow_scale_image;
 
-        rife_uhd_upscale_flow->destroy_pipeline(flownet.opt);
-        delete rife_uhd_upscale_flow;
+        rife_flow_resize_flow->destroy_pipeline(flownet.opt);
+        delete rife_flow_resize_flow;
 
-        rife_uhd_double_flow->destroy_pipeline(flownet.opt);
-        delete rife_uhd_double_flow;
+        rife_flow_scale_vectors->destroy_pipeline(flownet.opt);
+        delete rife_flow_scale_vectors;
     }
 
     if (rife_v2)
@@ -285,43 +287,43 @@ int RIFE::load(const std::string& modeldir)
         rife_out_tta_temporal_avg->create(spirv.data(), spirv.size() * 4, specializations);
     }
 
-    if (uhd_mode)
+    if (use_flow_scale)
     {
         {
-            rife_uhd_downscale_image = ncnn::create_layer("Interp");
-            rife_uhd_downscale_image->vkdev = vkdev;
+            rife_flow_scale_image = ncnn::create_layer("Interp");
+            rife_flow_scale_image->vkdev = vkdev;
 
             ncnn::ParamDict pd;
             pd.set(0, 2);// bilinear
-            pd.set(1, 0.5f);
-            pd.set(2, 0.5f);
-            rife_uhd_downscale_image->load_param(pd);
+            pd.set(1, flow_scale);
+            pd.set(2, flow_scale);
+            rife_flow_scale_image->load_param(pd);
 
-            rife_uhd_downscale_image->create_pipeline(opt);
+            rife_flow_scale_image->create_pipeline(opt);
         }
         {
-            rife_uhd_upscale_flow = ncnn::create_layer("Interp");
-            rife_uhd_upscale_flow->vkdev = vkdev;
+            rife_flow_resize_flow = ncnn::create_layer("Interp");
+            rife_flow_resize_flow->vkdev = vkdev;
 
             ncnn::ParamDict pd;
             pd.set(0, 2);// bilinear
-            pd.set(1, 2.f);
-            pd.set(2, 2.f);
-            rife_uhd_upscale_flow->load_param(pd);
+            pd.set(1, flow_scale_inv);
+            pd.set(2, flow_scale_inv);
+            rife_flow_resize_flow->load_param(pd);
 
-            rife_uhd_upscale_flow->create_pipeline(opt);
+            rife_flow_resize_flow->create_pipeline(opt);
         }
         {
-            rife_uhd_double_flow = ncnn::create_layer("BinaryOp");
-            rife_uhd_double_flow->vkdev = vkdev;
+            rife_flow_scale_vectors = ncnn::create_layer("BinaryOp");
+            rife_flow_scale_vectors->vkdev = vkdev;
 
             ncnn::ParamDict pd;
             pd.set(0, 2);// mul
             pd.set(1, 1);// with_scalar
-            pd.set(2, 2.f);// b
-            rife_uhd_double_flow->load_param(pd);
+            pd.set(2, flow_scale_inv);// b
+            rife_flow_scale_vectors->load_param(pd);
 
-            rife_uhd_double_flow->create_pipeline(opt);
+            rife_flow_scale_vectors->create_pipeline(opt);
         }
     }
 
@@ -541,12 +543,12 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
         ex.set_workspace_vkallocator(blob_vkallocator);
         ex.set_staging_vkallocator(staging_vkallocator);
 
-        if (uhd_mode)
+        if (use_flow_scale)
         {
             ncnn::VkMat in0_gpu_padded_downscaled;
             ncnn::VkMat in1_gpu_padded_downscaled;
-            rife_uhd_downscale_image->forward(in0_gpu_padded, in0_gpu_padded_downscaled, cmd, opt);
-            rife_uhd_downscale_image->forward(in1_gpu_padded, in1_gpu_padded_downscaled, cmd, opt);
+            rife_flow_scale_image->forward(in0_gpu_padded, in0_gpu_padded_downscaled, cmd, opt);
+            rife_flow_scale_image->forward(in1_gpu_padded, in1_gpu_padded_downscaled, cmd, opt);
 
             ex.input("input0", in0_gpu_padded_downscaled);
             ex.input("input1", in1_gpu_padded_downscaled);
@@ -555,8 +557,8 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
             ex.extract("flow", flow_downscaled, cmd);
 
             ncnn::VkMat flow_half;
-            rife_uhd_upscale_flow->forward(flow_downscaled, flow_half, cmd, opt);
-            rife_uhd_double_flow->forward(flow_half, flow, cmd, opt);
+            rife_flow_resize_flow->forward(flow_downscaled, flow_half, cmd, opt);
+            rife_flow_scale_vectors->forward(flow_half, flow, cmd, opt);
         }
         else
         {
@@ -771,12 +773,12 @@ int RIFE::process(const float* src0R, const float* src0G, const float* src0B,
             ex.set_workspace_vkallocator(blob_vkallocator);
             ex.set_staging_vkallocator(staging_vkallocator);
 
-            if (uhd_mode)
+            if (use_flow_scale)
             {
                 ncnn::VkMat in0_gpu_padded_downscaled;
                 ncnn::VkMat in1_gpu_padded_downscaled;
-                rife_uhd_downscale_image->forward(in0_gpu_padded[ti], in0_gpu_padded_downscaled, cmd, opt);
-                rife_uhd_downscale_image->forward(in1_gpu_padded[ti], in1_gpu_padded_downscaled, cmd, opt);
+                rife_flow_scale_image->forward(in0_gpu_padded[ti], in0_gpu_padded_downscaled, cmd, opt);
+                rife_flow_scale_image->forward(in1_gpu_padded[ti], in1_gpu_padded_downscaled, cmd, opt);
 
                 ex.input("input0", in0_gpu_padded_downscaled);
                 ex.input("input1", in1_gpu_padded_downscaled);
@@ -785,9 +787,9 @@ int RIFE::process(const float* src0R, const float* src0G, const float* src0B,
                 ex.extract("flow", flow_downscaled, cmd);
 
                 ncnn::VkMat flow_half;
-                rife_uhd_upscale_flow->forward(flow_downscaled, flow_half, cmd, opt);
+                rife_flow_resize_flow->forward(flow_downscaled, flow_half, cmd, opt);
 
-                rife_uhd_double_flow->forward(flow_half, flow[ti], cmd, opt);
+                rife_flow_scale_vectors->forward(flow_half, flow[ti], cmd, opt);
             }
             else
             {
@@ -808,12 +810,12 @@ int RIFE::process(const float* src0R, const float* src0G, const float* src0B,
                 ex.set_workspace_vkallocator(blob_vkallocator);
                 ex.set_staging_vkallocator(staging_vkallocator);
 
-                if (uhd_mode)
+                if (use_flow_scale)
                 {
                     ncnn::VkMat in0_gpu_padded_downscaled;
                     ncnn::VkMat in1_gpu_padded_downscaled;
-                    rife_uhd_downscale_image->forward(in0_gpu_padded[ti], in0_gpu_padded_downscaled, cmd, opt);
-                    rife_uhd_downscale_image->forward(in1_gpu_padded[ti], in1_gpu_padded_downscaled, cmd, opt);
+                    rife_flow_scale_image->forward(in0_gpu_padded[ti], in0_gpu_padded_downscaled, cmd, opt);
+                    rife_flow_scale_image->forward(in1_gpu_padded[ti], in1_gpu_padded_downscaled, cmd, opt);
 
                     ex.input("input0", in1_gpu_padded_downscaled);
                     ex.input("input1", in0_gpu_padded_downscaled);
@@ -822,9 +824,9 @@ int RIFE::process(const float* src0R, const float* src0G, const float* src0B,
                     ex.extract("flow", flow_downscaled, cmd);
 
                     ncnn::VkMat flow_half;
-                    rife_uhd_upscale_flow->forward(flow_downscaled, flow_half, cmd, opt);
+                    rife_flow_resize_flow->forward(flow_downscaled, flow_half, cmd, opt);
 
-                    rife_uhd_double_flow->forward(flow_half, flow_reversed[ti], cmd, opt);
+                    rife_flow_scale_vectors->forward(flow_half, flow_reversed[ti], cmd, opt);
                 }
                 else
                 {
@@ -1156,12 +1158,12 @@ int RIFE::process(const float* src0R, const float* src0G, const float* src0B,
             ex.set_workspace_vkallocator(blob_vkallocator);
             ex.set_staging_vkallocator(staging_vkallocator);
 
-            if (uhd_mode)
+            if (use_flow_scale)
             {
                 ncnn::VkMat in0_gpu_padded_downscaled;
                 ncnn::VkMat in1_gpu_padded_downscaled;
-                rife_uhd_downscale_image->forward(in0_gpu_padded, in0_gpu_padded_downscaled, cmd, opt);
-                rife_uhd_downscale_image->forward(in1_gpu_padded, in1_gpu_padded_downscaled, cmd, opt);
+                rife_flow_scale_image->forward(in0_gpu_padded, in0_gpu_padded_downscaled, cmd, opt);
+                rife_flow_scale_image->forward(in1_gpu_padded, in1_gpu_padded_downscaled, cmd, opt);
 
                 ex.input("input0", in0_gpu_padded_downscaled);
                 ex.input("input1", in1_gpu_padded_downscaled);
@@ -1170,9 +1172,9 @@ int RIFE::process(const float* src0R, const float* src0G, const float* src0B,
                 ex.extract("flow", flow_downscaled, cmd);
 
                 ncnn::VkMat flow_half;
-                rife_uhd_upscale_flow->forward(flow_downscaled, flow_half, cmd, opt);
+                rife_flow_resize_flow->forward(flow_downscaled, flow_half, cmd, opt);
 
-                rife_uhd_double_flow->forward(flow_half, flow, cmd, opt);
+                rife_flow_scale_vectors->forward(flow_half, flow, cmd, opt);
             }
             else
             {
@@ -1191,12 +1193,12 @@ int RIFE::process(const float* src0R, const float* src0G, const float* src0B,
             ex.set_workspace_vkallocator(blob_vkallocator);
             ex.set_staging_vkallocator(staging_vkallocator);
 
-            if (uhd_mode)
+            if (use_flow_scale)
             {
                 ncnn::VkMat in0_gpu_padded_downscaled;
                 ncnn::VkMat in1_gpu_padded_downscaled;
-                rife_uhd_downscale_image->forward(in0_gpu_padded, in0_gpu_padded_downscaled, cmd, opt);
-                rife_uhd_downscale_image->forward(in1_gpu_padded, in1_gpu_padded_downscaled, cmd, opt);
+                rife_flow_scale_image->forward(in0_gpu_padded, in0_gpu_padded_downscaled, cmd, opt);
+                rife_flow_scale_image->forward(in1_gpu_padded, in1_gpu_padded_downscaled, cmd, opt);
 
                 ex.input("input0", in1_gpu_padded_downscaled);
                 ex.input("input1", in0_gpu_padded_downscaled);
@@ -1205,9 +1207,9 @@ int RIFE::process(const float* src0R, const float* src0G, const float* src0B,
                 ex.extract("flow", flow_downscaled, cmd);
 
                 ncnn::VkMat flow_half;
-                rife_uhd_upscale_flow->forward(flow_downscaled, flow_half, cmd, opt);
+                rife_flow_resize_flow->forward(flow_downscaled, flow_half, cmd, opt);
 
-                rife_uhd_double_flow->forward(flow_half, flow_reversed, cmd, opt);
+                rife_flow_scale_vectors->forward(flow_half, flow_reversed, cmd, opt);
             }
             else
             {
