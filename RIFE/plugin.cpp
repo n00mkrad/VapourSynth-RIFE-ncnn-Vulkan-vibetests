@@ -193,92 +193,13 @@ static MotionVectorConfig createMotionVectorConfig(const VSVideoInfo& inputVi, c
     return config;
 }
 
-static ResolvedRIFEModel resolveRIFEModel(const int model, std::string modelPath, VSCore* core, const VSAPI* vsapi) {
+static ResolvedRIFEModel resolveRIFEModel(std::string modelPath) {
     ResolvedRIFEModel resolved{};
     resolved.modelPath = std::move(modelPath);
     resolved.padding = 32;
 
-    if (resolved.modelPath.empty()) {
-        std::string pluginPath{ vsapi->getPluginPath(vsapi->getPluginByID("com.holywu.rife", core)) };
-        resolved.modelPath = pluginPath.substr(0, pluginPath.rfind('/')) + "/models";
-
-        switch (model) {
-        case 0: resolved.modelPath += "/rife"; break;
-        case 1: resolved.modelPath += "/rife-HD"; break;
-        case 2: resolved.modelPath += "/rife-UHD"; break;
-        case 3: resolved.modelPath += "/rife-anime"; break;
-        case 4: resolved.modelPath += "/rife-v2"; break;
-        case 5: resolved.modelPath += "/rife-v2.3"; break;
-        case 6: resolved.modelPath += "/rife-v2.4"; break;
-        case 7: resolved.modelPath += "/rife-v3.0"; break;
-        case 8: resolved.modelPath += "/rife-v3.1"; break;
-        case 9: resolved.modelPath += "/rife-v3.9_ensembleFalse_fastTrue"; break;
-        case 10: resolved.modelPath += "/rife-v3.9_ensembleTrue_fastFalse"; break;
-        case 11: resolved.modelPath += "/rife-v4_ensembleFalse_fastTrue"; break;
-        case 12: resolved.modelPath += "/rife-v4_ensembleTrue_fastFalse"; break;
-        case 13: resolved.modelPath += "/rife-v4.1_ensembleFalse_fastTrue"; break;
-        case 14: resolved.modelPath += "/rife-v4.1_ensembleTrue_fastFalse"; break;
-        case 15: resolved.modelPath += "/rife-v4.2_ensembleFalse_fastTrue"; break;
-        case 16: resolved.modelPath += "/rife-v4.2_ensembleTrue_fastFalse"; break;
-        case 17: resolved.modelPath += "/rife-v4.3_ensembleFalse_fastTrue"; break;
-        case 18: resolved.modelPath += "/rife-v4.3_ensembleTrue_fastFalse"; break;
-        case 19: resolved.modelPath += "/rife-v4.4_ensembleFalse_fastTrue"; break;
-        case 20: resolved.modelPath += "/rife-v4.4_ensembleTrue_fastFalse"; break;
-        case 21: resolved.modelPath += "/rife-v4.5_ensembleFalse"; break;
-        case 22: resolved.modelPath += "/rife-v4.5_ensembleTrue"; break;
-        case 23: resolved.modelPath += "/rife-v4.6_ensembleFalse"; break;
-        case 24: resolved.modelPath += "/rife-v4.6_ensembleTrue"; break;
-        case 25: resolved.modelPath += "/rife-v4.7_ensembleFalse"; break;
-        case 26: resolved.modelPath += "/rife-v4.7_ensembleTrue"; break;
-        case 27: resolved.modelPath += "/rife-v4.8_ensembleFalse"; break;
-        case 28: resolved.modelPath += "/rife-v4.8_ensembleTrue"; break;
-        case 29: resolved.modelPath += "/rife-v4.9_ensembleFalse"; break;
-        case 30: resolved.modelPath += "/rife-v4.9_ensembleTrue"; break;
-        case 31: resolved.modelPath += "/rife-v4.10_ensembleFalse"; break;
-        case 32: resolved.modelPath += "/rife-v4.10_ensembleTrue"; break;
-        case 33: resolved.modelPath += "/rife-v4.11_ensembleFalse"; break;
-        case 34: resolved.modelPath += "/rife-v4.11_ensembleTrue"; break;
-        case 35: resolved.modelPath += "/rife-v4.12_ensembleFalse"; break;
-        case 36: resolved.modelPath += "/rife-v4.12_ensembleTrue"; break;
-        case 37: resolved.modelPath += "/rife-v4.12_lite_ensembleFalse"; break;
-        case 38: resolved.modelPath += "/rife-v4.12_lite_ensembleTrue"; break;
-        case 39: resolved.modelPath += "/rife-v4.13_ensembleFalse"; break;
-        case 40: resolved.modelPath += "/rife-v4.13_ensembleTrue"; break;
-        case 41: resolved.modelPath += "/rife-v4.13_lite_ensembleFalse"; break;
-        case 42: resolved.modelPath += "/rife-v4.13_lite_ensembleTrue"; break;
-        case 43: resolved.modelPath += "/rife-v4.14_ensembleFalse"; break;
-        case 44: resolved.modelPath += "/rife-v4.14_ensembleTrue"; break;
-        case 45: resolved.modelPath += "/rife-v4.14_lite_ensembleFalse"; break;
-        case 46: resolved.modelPath += "/rife-v4.14_lite_ensembleTrue"; break;
-        case 47: resolved.modelPath += "/rife-v4.15_ensembleFalse"; break;
-        case 48: resolved.modelPath += "/rife-v4.15_ensembleTrue"; break;
-        case 49: resolved.modelPath += "/rife-v4.15_lite_ensembleFalse"; break;
-        case 50: resolved.modelPath += "/rife-v4.15_lite_ensembleTrue"; break;
-        case 51: resolved.modelPath += "/rife-v4.16_lite_ensembleFalse"; break;
-        case 52: resolved.modelPath += "/rife-v4.16_lite_ensembleTrue"; break;
-        case 53: resolved.modelPath += "/rife-v4.17_ensembleFalse"; break;
-        case 54: resolved.modelPath += "/rife-v4.17_ensembleTrue"; break;
-        case 55: resolved.modelPath += "/rife-v4.17_lite_ensembleFalse"; break;
-        case 56: resolved.modelPath += "/rife-v4.17_lite_ensembleTrue"; break;
-        case 57: resolved.modelPath += "/rife-v4.18_ensembleFalse"; break;
-        case 58: resolved.modelPath += "/rife-v4.18_ensembleTrue"; break;
-        case 59: resolved.modelPath += "/rife-v4.19_beta_ensembleFalse"; break;
-        case 60: resolved.modelPath += "/rife-v4.19_beta_ensembleTrue"; break;
-        case 61: resolved.modelPath += "/rife-v4.20_ensembleFalse"; break;
-        case 62: resolved.modelPath += "/rife-v4.20_ensembleTrue"; break;
-        case 63: resolved.modelPath += "/rife-v4.21_ensembleFalse"; break;
-        case 64: resolved.modelPath += "/rife-v4.22_ensembleFalse"; break;
-        case 65: resolved.modelPath += "/rife-v4.22_lite_ensembleFalse"; break;
-        case 66: resolved.modelPath += "/rife-v4.23_beta_ensembleFalse"; break;
-        case 67: resolved.modelPath += "/rife-v4.24_ensembleFalse"; break;
-        case 68: resolved.modelPath += "/rife-v4.24_ensembleTrue"; break;
-        case 69: resolved.modelPath += "/rife-v4.25_ensembleFalse"; resolved.padding = 64; break;
-        case 70: resolved.modelPath += "/rife-v4.25-lite_ensembleFalse"; resolved.padding = 128; break;
-        case 71: resolved.modelPath += "/rife-v4.25_heavy_beta_ensembleFalse"; resolved.padding = 64; break;
-        case 72: resolved.modelPath += "/rife-v4.26_ensembleFalse"; resolved.padding = 64; break;
-        case 73: resolved.modelPath += "/rife-v4.26-large_ensembleFalse"; resolved.padding = 64; break;
-        }
-    }
+    if (resolved.modelPath.empty())
+        throw "model_path must be specified";
 
     std::ifstream ifs{ resolved.modelPath + "/flownet.param" };
     if (!ifs.is_open())
@@ -834,10 +755,6 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             throw "failed to create GPU instance";
         ++numGPUInstances;
 
-        auto model{ vsapi->mapGetIntSaturated(in, "model", 0, &err) };
-        if (err)
-            model = 5;
-
         auto factorNum{ vsapi->mapGetInt(in, "factor_num", 0, &err) };
         if (err)
             factorNum = 2;
@@ -909,9 +826,6 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
         if (err)
             d->skipThreshold = 60.0;
 
-        if (model < 0 || model > 76)
-            throw "model must be between 0 and 76 (inclusive)";
-
         if (factorNum < 1)
             throw "factor_num must be at least 1";
 
@@ -972,306 +886,12 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
 
         d->factor = d->factorNum / d->factorDen;
 
-        if (!!vsapi->mapGetInt(in, "list_gpu", 0, &err)) {
-            std::string text;
+        const auto resolvedModel = resolveRIFEModel(modelPath);
 
-            for (auto i{ 0 }; i < ncnn::get_gpu_count(); i++)
-                text += std::to_string(i) + ": " + ncnn::get_gpu_info(i).device_name() + "\n";
-
-            auto args{ vsapi->createMap() };
-            vsapi->mapConsumeNode(args, "clip", d->node, maReplace);
-            vsapi->mapSetData(args, "text", text.c_str(), -1, dtUtf8, maReplace);
-
-            auto ret{ vsapi->invoke(vsapi->getPluginByID(VSH_TEXT_PLUGIN_ID, core), "Text", args) };
-            if (vsapi->mapGetError(ret)) {
-                vsapi->mapSetError(out, vsapi->mapGetError(ret));
-                vsapi->freeMap(args);
-                vsapi->freeMap(ret);
-
-                if (--numGPUInstances == 0)
-                    ncnn::destroy_gpu_instance();
-                return;
-            }
-
-            vsapi->mapConsumeNode(out, "clip", vsapi->mapGetNode(ret, "clip", 0, nullptr), maReplace);
-            vsapi->freeMap(args);
-            vsapi->freeMap(ret);
-
-            if (--numGPUInstances == 0)
-                ncnn::destroy_gpu_instance();
-            return;
-        }
-        int padding;
-        padding = 32;
-        if (modelPath.empty()) {
-            std::string pluginPath{ vsapi->getPluginPath(vsapi->getPluginByID("com.holywu.rife", core)) };
-            modelPath = pluginPath.substr(0, pluginPath.rfind('/')) + "/models";
-
-            switch (model) {
-            case 0:
-                modelPath += "/rife";
-                break;
-            case 1:
-                modelPath += "/rife-HD";
-                break;
-            case 2:
-                modelPath += "/rife-UHD";
-                break;
-            case 3:
-                modelPath += "/rife-anime";
-                break;
-            case 4:
-                modelPath += "/rife-v2";
-                break;
-            case 5:
-                modelPath += "/rife-v2.3";
-                break;
-            case 6:
-                modelPath += "/rife-v2.4";
-                break;
-            case 7:
-                modelPath += "/rife-v3.0";
-                break;
-            case 8:
-                modelPath += "/rife-v3.1";
-                break;
-            
-            case 9:
-                modelPath += "/rife-v3.9_ensembleFalse_fastTrue";
-                break;
-            case 10:
-                modelPath += "/rife-v3.9_ensembleTrue_fastFalse";
-                break;
-            case 11:
-                modelPath += "/rife-v4_ensembleFalse_fastTrue";
-                break;
-            case 12:
-                modelPath += "/rife-v4_ensembleTrue_fastFalse";
-                break;
-            case 13:
-                modelPath += "/rife-v4.1_ensembleFalse_fastTrue";
-                break;
-            case 14:
-                modelPath += "/rife-v4.1_ensembleTrue_fastFalse";
-                break;
-            case 15:
-                modelPath += "/rife-v4.2_ensembleFalse_fastTrue";
-                break;
-            case 16:
-                modelPath += "/rife-v4.2_ensembleTrue_fastFalse";
-                break;
-            case 17:
-                modelPath += "/rife-v4.3_ensembleFalse_fastTrue";
-                break;
-            case 18:
-                modelPath += "/rife-v4.3_ensembleTrue_fastFalse";
-                break;
-            case 19:
-                modelPath += "/rife-v4.4_ensembleFalse_fastTrue";
-                break;
-            case 20:
-                modelPath += "/rife-v4.4_ensembleTrue_fastFalse";
-                break;
-            case 21:
-                modelPath += "/rife-v4.5_ensembleFalse";
-                break;
-            case 22:
-                modelPath += "/rife-v4.5_ensembleTrue";
-                break;
-            case 23:
-                modelPath += "/rife-v4.6_ensembleFalse";
-                break;
-            case 24:
-                modelPath += "/rife-v4.6_ensembleTrue";
-                break;
-            case 25:
-                modelPath += "/rife-v4.7_ensembleFalse";
-                break;
-            case 26:
-                modelPath += "/rife-v4.7_ensembleTrue";
-                break;
-            case 27:
-                modelPath += "/rife-v4.8_ensembleFalse";
-                break;
-            case 28:
-                modelPath += "/rife-v4.8_ensembleTrue";
-                break;
-            case 29:
-                modelPath += "/rife-v4.9_ensembleFalse";
-                break;
-            case 30:
-                modelPath += "/rife-v4.9_ensembleTrue";
-                break;
-            case 31:
-                modelPath += "/rife-v4.10_ensembleFalse";
-                break;
-            case 32:
-                modelPath += "/rife-v4.10_ensembleTrue";
-                break;
-            case 33:
-                modelPath += "/rife-v4.11_ensembleFalse";
-                break;
-            case 34:
-                modelPath += "/rife-v4.11_ensembleTrue";
-                break;
-            case 35:
-                modelPath += "/rife-v4.12_ensembleFalse";
-                break;
-            case 36:
-                modelPath += "/rife-v4.12_ensembleTrue";
-                break;
-            case 37:
-                modelPath += "/rife-v4.12_lite_ensembleFalse";
-                break;
-            case 38:
-                modelPath += "/rife-v4.12_lite_ensembleTrue";
-                break;
-            case 39:
-                modelPath += "/rife-v4.13_ensembleFalse";
-                break;
-            case 40:
-                modelPath += "/rife-v4.13_ensembleTrue";
-                break;
-            case 41:
-                modelPath += "/rife-v4.13_lite_ensembleFalse";
-                break;
-            case 42:
-                modelPath += "/rife-v4.13_lite_ensembleTrue";
-                break;
-            case 43:
-                modelPath += "/rife-v4.14_ensembleFalse";
-                break;
-            case 44:
-                modelPath += "/rife-v4.14_ensembleTrue";
-                break;
-            case 45:
-                modelPath += "/rife-v4.14_lite_ensembleFalse";
-                break;
-            case 46:
-                modelPath += "/rife-v4.14_lite_ensembleTrue";
-                break;
-            case 47:
-                modelPath += "/rife-v4.15_ensembleFalse";
-                break;
-            case 48:
-                modelPath += "/rife-v4.15_ensembleTrue";
-                break;
-            case 49:
-                modelPath += "/rife-v4.15_lite_ensembleFalse";
-                break;
-            case 50:
-                modelPath += "/rife-v4.15_lite_ensembleTrue";
-                break;
-            case 51:
-                modelPath += "/rife-v4.16_lite_ensembleFalse";
-                break;
-            case 52:
-                modelPath += "/rife-v4.16_lite_ensembleTrue";
-                break;
-            case 53:
-                modelPath += "/rife-v4.17_ensembleFalse";
-                break;
-            case 54:
-                modelPath += "/rife-v4.17_ensembleTrue";
-                break;
-            case 55:
-                modelPath += "/rife-v4.17_lite_ensembleFalse";
-                break;
-            case 56:
-                modelPath += "/rife-v4.17_lite_ensembleTrue";
-                break;
-            case 57:
-                modelPath += "/rife-v4.18_ensembleFalse";
-                break;
-            case 58:
-                modelPath += "/rife-v4.18_ensembleTrue";
-                break;
-            case 59:
-                modelPath += "/rife-v4.19_beta_ensembleFalse";
-                break;
-            case 60:
-                modelPath += "/rife-v4.19_beta_ensembleTrue";
-                break;
-            case 61:
-                modelPath += "/rife-v4.20_ensembleFalse";
-                break;
-            case 62:
-                modelPath += "/rife-v4.20_ensembleTrue";
-                break;
-            case 63:
-                modelPath += "/rife-v4.21_ensembleFalse";
-                break;
-            case 64:
-                modelPath += "/rife-v4.22_ensembleFalse";
-                break;
-            case 65:
-                modelPath += "/rife-v4.22_lite_ensembleFalse";
-                break;
-            case 66:
-                modelPath += "/rife-v4.23_beta_ensembleFalse";
-                break;
-            case 67:
-                modelPath += "/rife-v4.24_ensembleFalse";
-                break;
-            case 68:
-                modelPath += "/rife-v4.24_ensembleTrue";
-                break;
-            case 69:
-                modelPath += "/rife-v4.25_ensembleFalse";
-                padding = 64;
-                break;
-            case 70:
-                modelPath += "/rife-v4.25-lite_ensembleFalse";
-                padding = 128;
-                break;
-            case 71:
-                modelPath += "/rife-v4.25_heavy_beta_ensembleFalse";
-                padding = 64;
-                break;
-            case 72:
-                modelPath += "/rife-v4.26_ensembleFalse";
-                padding = 64;
-                break;
-            case 73:
-                modelPath += "/rife-v4.26-large_ensembleFalse";
-                padding = 64;
-                break;
-            }
-        }
-
-        std::ifstream ifs{ modelPath + "/flownet.param" };
-        if (!ifs.is_open())
-            throw "failed to load model";
-        ifs.close();
-
-        bool rife_v2{};
-        bool rife_v4{};
-        
-        if (modelPath.find("rife-v2") != std::string::npos)
-            rife_v2 = true;
-        else if (modelPath.find("rife-v3.9") != std::string::npos)
-            rife_v4 = true;
-        
-        else if (modelPath.find("rife-v3") != std::string::npos)
-            rife_v2 = true;
-        else if (modelPath.find("rife-v4") != std::string::npos)
-            rife_v4 = true;
-        else if (modelPath.find("rife4") != std::string::npos)
-            rife_v4 = true;
-        // rife 4.25 and 4.26 require more padding due to extra scales.
-        if (modelPath.find("rife-v4.25") != std::string::npos)
-            padding = 64;
-        if (modelPath.find("rife-v4.25-lite") != std::string::npos) 
-            padding = 128;
-        if (modelPath.find("rife-v4.26") != std::string::npos)
-            padding = 64;
-        else if (modelPath.find("rife") == std::string::npos)
-            throw "unknown model dir type";
-
-        if (!d->exportMotionVectors && !rife_v4 && (d->factorNum != 2 || d->factorDen != 1))
+        if (!d->exportMotionVectors && !resolvedModel.rifeV4 && (d->factorNum != 2 || d->factorDen != 1))
             throw "only rife-v4 model supports custom frame rate";
 
-        if (rife_v4 && tta)
+        if (resolvedModel.rifeV4 && tta)
             throw "rife-v4 model does not support TTA mode";
 
         if (d->exportMotionVectors) {
@@ -1281,7 +901,7 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             if (d->sceneChange || d->skip)
                 throw "mv=True does not support sc or skip";
 
-            if (modelPath.find("rife-v3.1") == std::string::npos)
+            if (resolvedModel.modelPath.find("rife-v3.1") == std::string::npos)
                 throw "mv=True currently requires the rife-v3.1 model";
 
             if (mvBlockSize < 1)
@@ -1413,16 +1033,8 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
             vsapi->freeMap(ret);
         }
 
-        d->rife = std::make_unique<RIFE>(gpuId, tta, uhd, 1, rife_v2, rife_v4, padding);
-
-#ifdef _WIN32
-        auto bufferSize{ MultiByteToWideChar(CP_UTF8, 0, modelPath.c_str(), -1, nullptr, 0) };
-        std::vector<wchar_t> wbuffer(bufferSize);
-        MultiByteToWideChar(CP_UTF8, 0, modelPath.c_str(), -1, wbuffer.data(), bufferSize);
-        d->rife->load(wbuffer.data());
-#else
-        d->rife->load(modelPath);
-#endif
+        d->rife = std::make_unique<RIFE>(gpuId, tta, uhd, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding);
+        loadRIFEModel(*d->rife, resolvedModel.modelPath);
     } catch (const char* error) {
         vsapi->mapSetError(out, ("RIFE: "s + error).c_str());
         vsapi->freeNode(d->node);
@@ -1466,10 +1078,6 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
             throw "failed to create GPU instance";
         ++numGPUInstances;
         hasGPUInstance = true;
-
-        auto model{ vsapi->mapGetIntSaturated(in, "model", 0, &err) };
-        if (err)
-            model = 5;
 
         auto model_path{ vsapi->mapGetData(in, "model_path", 0, &err) };
         std::string modelPath{ err ? "" : model_path };
@@ -1516,9 +1124,6 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
             hasMVClip = true;
         }
 
-        if (model < 0 || model > 76)
-            throw "model must be between 0 and 76 (inclusive)";
-
         if (hasMVClip) {
             if (!vsh::isConstantVideoFormat(&mvClipVi))
                 throw "mv_clip must have a constant format";
@@ -1539,7 +1144,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         if (gpuThread < 1)
             throw "gpu_thread must be greater than 0";
 
-        const auto resolvedModel = resolveRIFEModel(model, modelPath, core, vsapi);
+        const auto resolvedModel = resolveRIFEModel(modelPath);
         if (resolvedModel.modelPath.find("rife-v3.1") == std::string::npos)
             throw "RIFEMV currently requires the rife-v3.1 model";
 
@@ -1652,12 +1257,11 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
 
     vspapi->registerFunction("RIFE",
                              "clip:vnode;"
-                             "model:int:opt;"
                              "factor_num:int:opt;"
                              "factor_den:int:opt;"
                              "fps_num:int:opt;"
                              "fps_den:int:opt;"
-                             "model_path:data:opt;"
+                             "model_path:data;"
                              "gpu_id:int:opt;"
                              "gpu_thread:int:opt;"
                              "tta:int:opt;"
@@ -1676,15 +1280,13 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "mv_chroma:int:opt;"
                              "sc:int:opt;"
                              "skip:int:opt;"
-                             "skip_threshold:float:opt;"
-                             "list_gpu:int:opt;",
+                             "skip_threshold:float:opt;",
                              "clip:vnode;",
                              rifeCreate, nullptr, plugin);
 
     vspapi->registerFunction("RIFEMV",
                              "clip:vnode;"
-                             "model:int:opt;"
-                             "model_path:data:opt;"
+                             "model_path:data;"
                              "gpu_id:int:opt;"
                              "gpu_thread:int:opt;"
                              "uhd:int:opt;"
