@@ -576,6 +576,8 @@ static std::vector<char> buildMotionVectorBlobFromDisplacement(const VSFrame* cu
     return blob;
 }
 
+static void zeroMotionVectorFrame(VSFrame* frame, const VSVideoInfo& vi, const VSAPI* vsapi);
+
 static VSFrame* createMotionVectorFrame(const VSVideoInfo& vi, const MVAnalysisData& analysisData,
                                         const char* vectorBlob, const int vectorBlobSize,
                                         VSCore* core, const VSAPI* vsapi) {
