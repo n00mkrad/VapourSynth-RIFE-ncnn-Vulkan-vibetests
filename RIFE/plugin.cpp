@@ -49,6 +49,8 @@ constexpr auto MVToolsAnalysisDataKey = "MVTools_MVAnalysisData";
 constexpr auto MVToolsVectorsKey = "MVTools_vectors";
 constexpr auto RIFEMVBackwardVectorsInternalKey = "_RIFEMVBackwardVectors";
 constexpr auto RIFEMVForwardVectorsInternalKey = "_RIFEMVForwardVectors";
+constexpr auto RIFEMVBackwardDisplacementInternalKey = "_RIFEMVBackwardDisplacement";
+constexpr auto RIFEMVForwardDisplacementInternalKey = "_RIFEMVForwardDisplacement";
 constexpr int MotionIsBackward = 0x00000002;
 constexpr int MotionUseChromaMotion = 0x00000008;
 constexpr int MVBlockReduceCenter = 0;
@@ -288,6 +290,24 @@ struct RIFEMVOutputData final {
     bool backward;
 };
 
+struct RIFEMVApproxPairData final {
+    VSNode* node;
+    VSVideoInfo vi;
+    MotionVectorConfig mvConfig;
+    std::unique_ptr<RIFE> rife;
+    std::unique_ptr<std::counting_semaphore<>> semaphore;
+};
+
+struct RIFEMVApproxOutputData final {
+    VSNode* node;
+    VSNode* sourceNode;
+    VSVideoInfo vi;
+    MotionVectorConfig mvConfig;
+    MVAnalysisData analysisData;
+    std::vector<char> invalidBlob;
+    bool backward;
+};
+
 static float reduceBlockFlow(const float* flowPlane, const int width, const int height,
                              const int blockX, const int blockY, const RIFEData* const VS_RESTRICT d) noexcept {
     if (d->mvBlockReduce == MVBlockReduceCenter) {
@@ -428,6 +448,143 @@ static std::vector<char> buildMotionVectorBlobFromConfig(const VSFrame* current,
 
 static std::vector<char> buildInvalidMotionVectorBlob(const MotionVectorConfig& config, const bool backward) {
     return buildMotionVectorBlobFromConfig(nullptr, nullptr, nullptr, false, config, backward, nullptr);
+}
+
+static float sampleBilinearPlane(const float* data, const int width, const int height, float x, float y) noexcept {
+    x = std::clamp(x, 0.0f, static_cast<float>(width - 1));
+    y = std::clamp(y, 0.0f, static_cast<float>(height - 1));
+
+    const auto x0 = static_cast<int>(std::floor(x));
+    const auto y0 = static_cast<int>(std::floor(y));
+    const auto x1 = std::min(x0 + 1, width - 1);
+    const auto y1 = std::min(y0 + 1, height - 1);
+    const auto alpha = x - x0;
+    const auto beta = y - y0;
+    const auto row0 = static_cast<size_t>(y0) * width;
+    const auto row1 = static_cast<size_t>(y1) * width;
+    const auto top = data[row0 + x0] * (1.0f - alpha) + data[row0 + x1] * alpha;
+    const auto bottom = data[row1 + x0] * (1.0f - alpha) + data[row1 + x1] * alpha;
+
+    return top * (1.0f - beta) + bottom * beta;
+}
+
+static std::vector<float> buildDisplacementFromFlow(const float* flow, const int width, const int height,
+                                                    const int channelOffset) {
+    const auto planeSize = static_cast<size_t>(width) * height;
+    std::vector<float> displacement(planeSize * 2);
+
+    for (size_t i = 0; i < planeSize; i++) {
+        displacement[i] = -2.0f * flow[(static_cast<size_t>(channelOffset) + 0) * planeSize + i];
+        displacement[planeSize + i] = -2.0f * flow[(static_cast<size_t>(channelOffset) + 1) * planeSize + i];
+    }
+
+    return displacement;
+}
+
+static bool getDisplacementPlanes(const VSFrame* frame, const char* key, const int width, const int height,
+                                  const float*& displacementX, const float*& displacementY,
+                                  const VSAPI* vsapi) noexcept {
+    const auto props = vsapi->getFramePropertiesRO(frame);
+    int err{};
+    const auto* data = vsapi->mapGetData(props, key, 0, &err);
+    if (err)
+        return false;
+
+    const auto expectedSize = static_cast<int>(sizeof(float) * static_cast<size_t>(width) * height * 2);
+    if (vsapi->mapGetDataSize(props, key, 0, nullptr) != expectedSize)
+        return false;
+
+    displacementX = reinterpret_cast<const float*>(data);
+    displacementY = displacementX + static_cast<size_t>(width) * height;
+    return true;
+}
+
+static void composeDisplacementSequence(const std::vector<const float*>& displacementXs,
+                                        const std::vector<const float*>& displacementYs,
+                                        const int width, const int height,
+                                        std::vector<float>& composedX,
+                                        std::vector<float>& composedY) {
+    const auto planeSize = static_cast<size_t>(width) * height;
+    composedX.assign(displacementXs.front(), displacementXs.front() + planeSize);
+    composedY.assign(displacementYs.front(), displacementYs.front() + planeSize);
+
+    for (size_t sequenceIndex = 1; sequenceIndex < displacementXs.size(); sequenceIndex++) {
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                const auto index = static_cast<size_t>(y) * width + x;
+                const auto sampleX = static_cast<float>(x) + composedX[index];
+                const auto sampleY = static_cast<float>(y) + composedY[index];
+                composedX[index] += sampleBilinearPlane(displacementXs[sequenceIndex], width, height, sampleX, sampleY);
+                composedY[index] += sampleBilinearPlane(displacementYs[sequenceIndex], width, height, sampleX, sampleY);
+            }
+        }
+    }
+}
+
+static std::vector<char> buildMotionVectorBlobFromDisplacement(const VSFrame* current, const VSFrame* reference,
+                                                               const float* displacementX, const float* displacementY,
+                                                               const bool valid, const MotionVectorConfig& config,
+                                                               const bool backward, const VSAPI* vsapi) {
+    const auto d = makeMotionVectorBuilderData(config, backward);
+    const auto vectorCount = static_cast<size_t>(d.mvBlkX) * d.mvBlkY;
+    std::vector<MVToolsVector> vectors(vectorCount);
+
+    if (!valid) {
+        for (auto& vector : vectors) {
+            vector.x = 0;
+            vector.y = 0;
+            vector.sad = d.mvInvalidSad;
+        }
+    } else {
+        const auto width = vsapi->getFrameWidth(current, 0);
+        const auto height = vsapi->getFrameHeight(current, 0);
+
+        for (auto by = 0; by < d.mvBlkY; by++) {
+            const auto blockY = by * d.mvStepY - d.mvVPadding;
+            for (auto bx = 0; bx < d.mvBlkX; bx++) {
+                const auto blockX = bx * d.mvStepX - d.mvHPadding;
+                auto& vector = vectors[static_cast<size_t>(by) * d.mvBlkX + bx];
+                const auto pixelDx = reduceBlockFlow(displacementX, width, height, blockX, blockY, &d);
+                const auto pixelDy = reduceBlockFlow(displacementY, width, height, blockX, blockY, &d);
+
+                vector.x = static_cast<int>(std::lround(pixelDx * d.mvPel));
+                vector.y = static_cast<int>(std::lround(pixelDy * d.mvPel));
+                vector.x = clampMotionVectorComponent(vector.x, d.mvPel, blockX, d.mvBlockSize, width, d.mvHPadding);
+                vector.y = clampMotionVectorComponent(vector.y, d.mvPel, blockY, d.mvBlockSize, height, d.mvVPadding);
+                vector.sad = computeBlockSAD(current, reference,
+                                             static_cast<int>(std::lround(static_cast<double>(vector.x) / d.mvPel)),
+                                             static_cast<int>(std::lround(static_cast<double>(vector.y) / d.mvPel)),
+                                             blockX, blockY, width, height, &d, vsapi);
+            }
+        }
+    }
+
+    const auto planeSize = static_cast<MVArraySizeType>(sizeof(MVArraySizeType) + vectors.size() * sizeof(MVToolsVector));
+    const auto groupSize = static_cast<MVArraySizeType>(sizeof(MVArraySizeType) * 2 + planeSize);
+    std::vector<char> blob(groupSize);
+    size_t offset{};
+    const auto writeScalar = [&](const auto value) {
+        std::memcpy(blob.data() + offset, &value, sizeof(value));
+        offset += sizeof(value);
+    };
+
+    writeScalar(groupSize);
+    writeScalar(valid ? MVArraySizeType{ 1 } : MVArraySizeType{ 0 });
+    writeScalar(planeSize);
+    std::memcpy(blob.data() + offset, vectors.data(), vectors.size() * sizeof(MVToolsVector));
+
+    return blob;
+}
+
+static VSFrame* createMotionVectorFrame(const VSVideoInfo& vi, const MVAnalysisData& analysisData,
+                                        const char* vectorBlob, const int vectorBlobSize,
+                                        VSCore* core, const VSAPI* vsapi) {
+    auto dst = vsapi->newVideoFrame(&vi.format, vi.width, vi.height, nullptr, core);
+    zeroMotionVectorFrame(dst, vi, vsapi);
+    auto props = vsapi->getFramePropertiesRW(dst);
+    vsapi->mapSetData(props, MVToolsAnalysisDataKey, reinterpret_cast<const char*>(&analysisData), sizeof(analysisData), dtBinary, maReplace);
+    vsapi->mapSetData(props, MVToolsVectorsKey, vectorBlob, vectorBlobSize, dtBinary, maReplace);
+    return dst;
 }
 
 static void zeroMotionVectorFrame(VSFrame* frame, const VSVideoInfo& vi, const VSAPI* vsapi) {
@@ -707,6 +864,192 @@ static const VSFrame* VS_CC rifeMVOutputGetFrame(int n, int activationReason, vo
     }
 
     return nullptr;
+}
+
+static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason, void* instanceData,
+                                                     [[maybe_unused]] void** frameData,
+                                                     VSFrameContext* frameCtx, VSCore* core, const VSAPI* vsapi) {
+    auto d{ static_cast<const RIFEMVApproxPairData*>(instanceData) };
+
+    if (activationReason == arInitial) {
+        vsapi->requestFrameFilter(n, d->node, frameCtx);
+        if (n + 1 < d->vi.numFrames)
+            vsapi->requestFrameFilter(n + 1, d->node, frameCtx);
+    } else if (activationReason == arAllFramesReady) {
+        auto current = vsapi->getFrameFilter(n, d->node, frameCtx);
+        const VSFrame* reference = n + 1 < d->vi.numFrames ? vsapi->getFrameFilter(n + 1, d->node, frameCtx) : nullptr;
+
+        auto dst = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, current, core);
+        zeroMotionVectorFrame(dst, d->vi, vsapi);
+        auto props = vsapi->getFramePropertiesRW(dst);
+
+        std::vector<char> backwardBlob;
+        std::vector<char> forwardBlob;
+        std::vector<float> backwardDisplacement;
+        std::vector<float> forwardDisplacement;
+        const auto planeSize = static_cast<size_t>(d->vi.width) * d->vi.height;
+
+        if (reference) {
+            const auto width = vsapi->getFrameWidth(current, 0);
+            const auto height = vsapi->getFrameHeight(current, 0);
+            const auto stride = vsapi->getStride(current, 0) / vsapi->getVideoFrameFormat(current)->bytesPerSample;
+            std::vector<float> flow(static_cast<size_t>(width) * height * 4);
+            const auto currentR = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 0));
+            const auto currentG = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 1));
+            const auto currentB = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 2));
+            const auto referenceR = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 0));
+            const auto referenceG = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 1));
+            const auto referenceB = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 2));
+
+            d->semaphore->acquire();
+            const auto status = d->rife->process_flow(currentR, currentG, currentB, referenceR, referenceG, referenceB,
+                                                      flow.data(), width, height, stride);
+            d->semaphore->release();
+            if (status != 0) {
+                vsapi->freeFrame(current);
+                vsapi->freeFrame(reference);
+                vsapi->freeFrame(dst);
+                vsapi->setFilterError("RIFEMVApprox: failed to export motion vectors", frameCtx);
+                return nullptr;
+            }
+
+            backwardBlob = buildMotionVectorBlobFromConfig(current, reference, flow.data(), true, d->mvConfig, true, vsapi);
+            forwardBlob = buildMotionVectorBlobFromConfig(reference, current, flow.data(), true, d->mvConfig, false, vsapi);
+            backwardDisplacement = buildDisplacementFromFlow(flow.data(), width, height, 0);
+            forwardDisplacement = buildDisplacementFromFlow(flow.data(), width, height, 2);
+        } else {
+            backwardBlob = buildInvalidMotionVectorBlob(d->mvConfig, true);
+            forwardBlob = buildInvalidMotionVectorBlob(d->mvConfig, false);
+            backwardDisplacement.assign(planeSize * 2, 0.0f);
+            forwardDisplacement.assign(planeSize * 2, 0.0f);
+        }
+
+        vsapi->mapSetData(props, RIFEMVBackwardVectorsInternalKey, backwardBlob.data(), static_cast<int>(backwardBlob.size()), dtBinary, maReplace);
+        vsapi->mapSetData(props, RIFEMVForwardVectorsInternalKey, forwardBlob.data(), static_cast<int>(forwardBlob.size()), dtBinary, maReplace);
+        vsapi->mapSetData(props, RIFEMVBackwardDisplacementInternalKey,
+                          reinterpret_cast<const char*>(backwardDisplacement.data()),
+                          static_cast<int>(backwardDisplacement.size() * sizeof(float)), dtBinary, maReplace);
+        vsapi->mapSetData(props, RIFEMVForwardDisplacementInternalKey,
+                          reinterpret_cast<const char*>(forwardDisplacement.data()),
+                          static_cast<int>(forwardDisplacement.size() * sizeof(float)), dtBinary, maReplace);
+
+        vsapi->freeFrame(current);
+        vsapi->freeFrame(reference);
+        return dst;
+    }
+
+    return nullptr;
+}
+
+static const VSFrame* VS_CC rifeMVApproxOutputGetFrame(int n, int activationReason, void* instanceData,
+                                                       [[maybe_unused]] void** frameData,
+                                                       VSFrameContext* frameCtx, VSCore* core, const VSAPI* vsapi) {
+    auto d{ static_cast<const RIFEMVApproxOutputData*>(instanceData) };
+    const auto delta = d->analysisData.nDeltaFrame;
+    const auto valid = d->backward ? n + delta < d->vi.numFrames : n >= delta;
+    const auto createInvalidFrame = [&]() {
+        return createMotionVectorFrame(d->vi, d->analysisData, d->invalidBlob.data(), static_cast<int>(d->invalidBlob.size()), core, vsapi);
+    };
+
+    if (activationReason == arInitial) {
+        if (!valid)
+            return createInvalidFrame();
+
+        for (auto i = 0; i < delta; i++) {
+            const auto pairIndex = d->backward ? n + i : n - 1 - i;
+            vsapi->requestFrameFilter(pairIndex, d->node, frameCtx);
+        }
+
+        if (delta > 1) {
+            vsapi->requestFrameFilter(n, d->sourceNode, frameCtx);
+            vsapi->requestFrameFilter(d->backward ? n + delta : n - delta, d->sourceNode, frameCtx);
+        }
+    } else if (activationReason == arAllFramesReady) {
+        if (!valid)
+            return createInvalidFrame();
+
+        std::vector<const VSFrame*> pairFrames(delta);
+        const VSFrame* current{};
+        const VSFrame* reference{};
+        const auto cleanup = [&]() {
+            for (const auto* pairFrame : pairFrames) {
+                if (pairFrame)
+                    vsapi->freeFrame(pairFrame);
+            }
+            if (current)
+                vsapi->freeFrame(current);
+            if (reference)
+                vsapi->freeFrame(reference);
+        };
+
+        for (auto i = 0; i < delta; i++) {
+            const auto pairIndex = d->backward ? n + i : n - 1 - i;
+            pairFrames[i] = vsapi->getFrameFilter(pairIndex, d->node, frameCtx);
+        }
+
+        if (delta == 1) {
+            const auto props = vsapi->getFramePropertiesRO(pairFrames[0]);
+            const auto blobKey = d->backward ? RIFEMVBackwardVectorsInternalKey : RIFEMVForwardVectorsInternalKey;
+            int err{};
+            const auto* vectorBlob = vsapi->mapGetData(props, blobKey, 0, &err);
+            const auto vectorBlobSize = err ? 0 : vsapi->mapGetDataSize(props, blobKey, 0, nullptr);
+            if (err || !vectorBlob || vectorBlobSize <= 0) {
+                cleanup();
+                vsapi->setFilterError("RIFEMVApprox: missing internal vector data", frameCtx);
+                return nullptr;
+            }
+
+            auto dst = createMotionVectorFrame(d->vi, d->analysisData, vectorBlob, vectorBlobSize, core, vsapi);
+            cleanup();
+            return dst;
+        }
+
+        current = vsapi->getFrameFilter(n, d->sourceNode, frameCtx);
+        reference = vsapi->getFrameFilter(d->backward ? n + delta : n - delta, d->sourceNode, frameCtx);
+        const auto width = vsapi->getFrameWidth(current, 0);
+        const auto height = vsapi->getFrameHeight(current, 0);
+        const auto displacementKey = d->backward ? RIFEMVBackwardDisplacementInternalKey : RIFEMVForwardDisplacementInternalKey;
+        std::vector<const float*> displacementXs(delta);
+        std::vector<const float*> displacementYs(delta);
+
+        for (auto i = 0; i < delta; i++) {
+            if (!getDisplacementPlanes(pairFrames[i], displacementKey, width, height,
+                                       displacementXs[i], displacementYs[i], vsapi)) {
+                cleanup();
+                vsapi->setFilterError("RIFEMVApprox: missing internal displacement data", frameCtx);
+                return nullptr;
+            }
+        }
+
+        std::vector<float> composedX;
+        std::vector<float> composedY;
+        composeDisplacementSequence(displacementXs, displacementYs, width, height, composedX, composedY);
+        const auto vectorBlob = buildMotionVectorBlobFromDisplacement(current, reference,
+                                                                      composedX.data(), composedY.data(), true,
+                                                                      d->mvConfig, d->backward, vsapi);
+
+        auto dst = createMotionVectorFrame(d->vi, d->analysisData, vectorBlob.data(), static_cast<int>(vectorBlob.size()), core, vsapi);
+        cleanup();
+        return dst;
+    }
+
+    return nullptr;
+}
+
+static void VS_CC rifeMVApproxPairFree(void* instanceData, [[maybe_unused]] VSCore* core, const VSAPI* vsapi) {
+    auto d{ static_cast<RIFEMVApproxPairData*>(instanceData) };
+    vsapi->freeNode(d->node);
+    delete d;
+
+    if (--numGPUInstances == 0)
+        ncnn::destroy_gpu_instance();
+}
+
+static void VS_CC rifeMVApproxOutputFree(void* instanceData, [[maybe_unused]] VSCore* core, const VSAPI* vsapi) {
+    auto d{ static_cast<RIFEMVApproxOutputData*>(instanceData) };
+    vsapi->freeNode(d->node);
+    vsapi->freeNode(d->sourceNode);
+    delete d;
 }
 
 static void VS_CC rifeMVPairFree(void* instanceData, [[maybe_unused]] VSCore* core, const VSAPI* vsapi) {
@@ -1258,6 +1601,232 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
     vsapi->mapConsumeNode(out, "clip", forwardNode, maAppend);
 }
 
+static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, const VSAPI* vsapi,
+                                   const int maxDelta, const char* functionName) {
+    auto pairData{ std::make_unique<RIFEMVApproxPairData>() };
+    VSNode* mvClip{};
+    VSNode* sourceNode{};
+    VSNode* pairNode{};
+    VSVideoInfo mvClipVi{};
+    bool hasMVClip{};
+    bool hasGPUInstance{};
+    std::vector<MotionVectorConfig> outputConfigs(maxDelta + 1);
+    std::vector<VSNode*> outputNodes;
+
+    try {
+        pairData->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
+        pairData->vi = *vsapi->getVideoInfo(pairData->node);
+        int err;
+
+        if (!vsh::isConstantVideoFormat(&pairData->vi) ||
+            pairData->vi.format.colorFamily != cfRGB ||
+            pairData->vi.format.sampleType != stFloat ||
+            pairData->vi.format.bitsPerSample != 32)
+            throw "only constant RGB format 32 bit float input supported";
+
+        if (ncnn::create_gpu_instance())
+            throw "failed to create GPU instance";
+        ++numGPUInstances;
+        hasGPUInstance = true;
+
+        auto model_path{ vsapi->mapGetData(in, "model_path", 0, &err) };
+        std::string modelPath{ err ? "" : model_path };
+
+        auto gpuId{ vsapi->mapGetIntSaturated(in, "gpu_id", 0, &err) };
+        if (err)
+            gpuId = ncnn::get_default_gpu_index();
+
+        auto gpuThread{ vsapi->mapGetIntSaturated(in, "gpu_thread", 0, &err) };
+        if (err)
+            gpuThread = 2;
+
+        auto flowScale{ static_cast<float>(vsapi->mapGetFloat(in, "flow_scale", 0, &err)) };
+        if (err)
+            flowScale = 1.f;
+        auto mvBlockSize{ vsapi->mapGetIntSaturated(in, "mv_block_size", 0, &err) };
+        if (err)
+            mvBlockSize = 16;
+        auto mvOverlap{ vsapi->mapGetIntSaturated(in, "mv_overlap", 0, &err) };
+        if (err)
+            mvOverlap = 8;
+        auto mvPel{ vsapi->mapGetIntSaturated(in, "mv_pel", 0, &err) };
+        if (err)
+            mvPel = 1;
+        auto mvBits{ vsapi->mapGetIntSaturated(in, "mv_bits", 0, &err) };
+        const auto mvBitsSpecified = !err;
+        if (err)
+            mvBits = 8;
+        auto mvHPadding{ vsapi->mapGetIntSaturated(in, "mv_hpad", 0, &err) };
+        if (err)
+            mvHPadding = 0;
+        auto mvVPadding{ vsapi->mapGetIntSaturated(in, "mv_vpad", 0, &err) };
+        if (err)
+            mvVPadding = 0;
+        auto mvBlockReduce{ vsapi->mapGetIntSaturated(in, "mv_block_reduce", 0, &err) };
+        if (err)
+            mvBlockReduce = MVBlockReduceAverage;
+        const auto mvUseChroma = !!vsapi->mapGetInt(in, "mv_chroma", 0, &err);
+
+        mvClip = vsapi->mapGetNode(in, "mv_clip", 0, &err);
+        if (!err) {
+            mvClipVi = *vsapi->getVideoInfo(mvClip);
+            hasMVClip = true;
+        }
+
+        if (hasMVClip) {
+            if (!vsh::isConstantVideoFormat(&mvClipVi))
+                throw "mv_clip must have a constant format";
+
+            if (mvClipVi.width != pairData->vi.width || mvClipVi.height != pairData->vi.height)
+                throw "mv_clip dimensions must match clip";
+
+            if (!mvBitsSpecified)
+                mvBits = mvClipVi.format.bitsPerSample;
+        }
+
+        if (gpuId < 0 || gpuId >= ncnn::get_gpu_count())
+            throw "invalid GPU device";
+
+        if (auto queueCount{ ncnn::get_gpu_info(gpuId).compute_queue_count() }; static_cast<uint32_t>(gpuThread) > queueCount)
+            std::cerr << "Warning: gpu_thread is recommended to be between 1 and " << queueCount << " (inclusive)" << std::endl;
+
+        if (gpuThread < 1)
+            throw "gpu_thread must be greater than 0";
+
+        if (!std::isfinite(flowScale) || flowScale <= 0.f)
+            throw "flow_scale must be greater than 0";
+
+        const auto resolvedModel = resolveRIFEModel(modelPath);
+        if (resolvedModel.modelPath.find("rife-v3.1") == std::string::npos)
+            throw "currently requires the rife-v3.1 model";
+
+        if (mvBlockSize < 1)
+            throw "mv_block_size must be at least 1";
+
+        if (mvOverlap < 0 || mvOverlap >= mvBlockSize)
+            throw "mv_overlap must be between 0 and mv_block_size - 1";
+
+        if (mvPel < 1)
+            throw "mv_pel must be at least 1";
+
+        if (mvBits < 1 || mvBits > 16)
+            throw "mv_bits must be between 1 and 16 (inclusive)";
+
+        if (mvHPadding < 0 || mvVPadding < 0)
+            throw "mv_hpad and mv_vpad must be non-negative";
+
+        if (mvBlockReduce != MVBlockReduceCenter && mvBlockReduce != MVBlockReduceAverage)
+            throw "mv_block_reduce must be 0 (center) or 1 (average)";
+
+        pairData->mvConfig = createMotionVectorConfig(pairData->vi, hasMVClip ? &mvClipVi : nullptr,
+                                                      mvUseChroma, mvBlockSize, mvOverlap, mvPel, 1,
+                                                      mvBits, mvHPadding, mvVPadding, mvBlockReduce);
+        for (auto delta = 1; delta <= maxDelta; delta++) {
+            outputConfigs[delta] = createMotionVectorConfig(pairData->vi, hasMVClip ? &mvClipVi : nullptr,
+                                                            mvUseChroma, mvBlockSize, mvOverlap, mvPel, delta,
+                                                            mvBits, mvHPadding, mvVPadding, mvBlockReduce);
+        }
+
+        if (!vsapi->getVideoFormatByID(&pairData->vi.format, pfGray8, core))
+            throw "failed to create output format";
+
+        if (mvClip) {
+            vsapi->freeNode(mvClip);
+            mvClip = nullptr;
+        }
+
+        sourceNode = vsapi->addNodeRef(pairData->node);
+        pairData->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
+        pairData->rife = std::make_unique<RIFE>(gpuId, false, flowScale, 1, resolvedModel.rifeV2, resolvedModel.rifeV4, resolvedModel.padding);
+        loadRIFEModel(*pairData->rife, resolvedModel.modelPath);
+    } catch (const char* error) {
+        vsapi->mapSetError(out, (std::string(functionName) + ": " + error).c_str());
+        vsapi->freeNode(pairData->node);
+        vsapi->freeNode(mvClip);
+        vsapi->freeNode(sourceNode);
+
+        if (hasGPUInstance && --numGPUInstances == 0)
+            ncnn::destroy_gpu_instance();
+        return;
+    }
+
+    const auto outputVi = pairData->vi;
+    VSFilterDependency pairDeps[]{ { pairData->node, rpGeneral } };
+    pairNode = vsapi->createVideoFilter2("RIFEMVApproxPair", &pairData->vi, rifeMVApproxPairGetFrame,
+                                         rifeMVApproxPairFree, fmParallel, pairDeps, 1, pairData.get(), core);
+    if (!pairNode) {
+        vsapi->mapSetError(out, (std::string(functionName) + ": failed to create internal pair filter").c_str());
+        vsapi->freeNode(pairData->node);
+        vsapi->freeNode(sourceNode);
+        if (hasGPUInstance && --numGPUInstances == 0)
+            ncnn::destroy_gpu_instance();
+        return;
+    }
+    pairData.release();
+
+    const auto createOutputNode = [&](const MotionVectorConfig& mvConfig, const bool backward) {
+        auto outputData{ std::make_unique<RIFEMVApproxOutputData>() };
+        outputData->node = vsapi->addNodeRef(pairNode);
+        outputData->sourceNode = vsapi->addNodeRef(sourceNode);
+        outputData->vi = outputVi;
+        outputData->mvConfig = mvConfig;
+        outputData->analysisData = backward ? mvConfig.backwardAnalysisData : mvConfig.forwardAnalysisData;
+        outputData->invalidBlob = buildInvalidMotionVectorBlob(mvConfig, backward);
+        outputData->backward = backward;
+        VSFilterDependency deps[]{ { outputData->node, rpGeneral }, { outputData->sourceNode, rpGeneral } };
+        auto node = vsapi->createVideoFilter2(backward ? "RIFEMVApproxBackward" : "RIFEMVApproxForward",
+                                              &outputData->vi, rifeMVApproxOutputGetFrame, rifeMVApproxOutputFree,
+                                              fmParallel, deps, 2, outputData.get(), core);
+        if (!node) {
+            vsapi->freeNode(outputData->node);
+            vsapi->freeNode(outputData->sourceNode);
+            return static_cast<VSNode*>(nullptr);
+        }
+
+        outputData.release();
+        return node;
+    };
+
+    for (auto delta = 1; delta <= maxDelta; delta++) {
+        auto backwardNode = createOutputNode(outputConfigs[delta], true);
+        if (!backwardNode) {
+            vsapi->mapSetError(out, (std::string(functionName) + ": failed to create backward output filter").c_str());
+            for (auto* node : outputNodes)
+                vsapi->freeNode(node);
+            vsapi->freeNode(pairNode);
+            vsapi->freeNode(sourceNode);
+            return;
+        }
+        outputNodes.push_back(backwardNode);
+
+        auto forwardNode = createOutputNode(outputConfigs[delta], false);
+        if (!forwardNode) {
+            vsapi->mapSetError(out, (std::string(functionName) + ": failed to create forward output filter").c_str());
+            for (auto* node : outputNodes)
+                vsapi->freeNode(node);
+            vsapi->freeNode(pairNode);
+            vsapi->freeNode(sourceNode);
+            return;
+        }
+        outputNodes.push_back(forwardNode);
+    }
+
+    vsapi->freeNode(pairNode);
+    vsapi->freeNode(sourceNode);
+    for (auto* node : outputNodes)
+        vsapi->mapConsumeNode(out, "clip", node, maAppend);
+}
+
+static void VS_CC rifeMVApprox2Create(const VSMap* in, VSMap* out, [[maybe_unused]] void* userData,
+                                      VSCore* core, const VSAPI* vsapi) {
+    rifeMVApproxCreateImpl(in, out, core, vsapi, 2, "RIFEMVApprox2");
+}
+
+static void VS_CC rifeMVApprox3Create(const VSMap* in, VSMap* out, [[maybe_unused]] void* userData,
+                                      VSCore* core, const VSAPI* vsapi) {
+    rifeMVApproxCreateImpl(in, out, core, vsapi, 3, "RIFEMVApprox3");
+}
+
 //////////////////////////////////////////
 // Init
 
@@ -1312,4 +1881,40 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI
                              "mv_chroma:int:opt;",
                              "clip:vnode[];",
                              rifeMVCreate, nullptr, plugin);
+
+    vspapi->registerFunction("RIFEMVApprox2",
+                             "clip:vnode;"
+                             "model_path:data;"
+                             "gpu_id:int:opt;"
+                             "gpu_thread:int:opt;"
+                             "flow_scale:float:opt;"
+                             "mv_block_size:int:opt;"
+                             "mv_overlap:int:opt;"
+                             "mv_pel:int:opt;"
+                             "mv_bits:int:opt;"
+                             "mv_clip:vnode:opt;"
+                             "mv_hpad:int:opt;"
+                             "mv_vpad:int:opt;"
+                             "mv_block_reduce:int:opt;"
+                             "mv_chroma:int:opt;",
+                             "clip:vnode[];",
+                             rifeMVApprox2Create, nullptr, plugin);
+
+    vspapi->registerFunction("RIFEMVApprox3",
+                             "clip:vnode;"
+                             "model_path:data;"
+                             "gpu_id:int:opt;"
+                             "gpu_thread:int:opt;"
+                             "flow_scale:float:opt;"
+                             "mv_block_size:int:opt;"
+                             "mv_overlap:int:opt;"
+                             "mv_pel:int:opt;"
+                             "mv_bits:int:opt;"
+                             "mv_clip:vnode:opt;"
+                             "mv_hpad:int:opt;"
+                             "mv_vpad:int:opt;"
+                             "mv_block_reduce:int:opt;"
+                             "mv_chroma:int:opt;",
+                             "clip:vnode[];",
+                             rifeMVApprox3Create, nullptr, plugin);
 }
