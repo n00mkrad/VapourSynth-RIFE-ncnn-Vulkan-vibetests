@@ -3,6 +3,7 @@
 #include "rife.h"
 //#include <iostream>
 
+#include <array>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -18,7 +19,7 @@
 
 DEFINE_LAYER_CREATOR(Warp)
 
-RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _rife_v4, int _padding)
+RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _rife_v4, int _padding, FlowResizeMode _flow_resize_mode)
 {
     vkdev = gpuid == -1 ? 0 : ncnn::get_gpu_device(gpuid);
 
@@ -28,10 +29,13 @@ RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _
     rife_flow_scale_image = 0;
     rife_flow_resize_flow = 0;
     rife_flow_scale_vectors = 0;
+    rife_flow_resize_output = 0;
+    rife_flow_double_vectors = 0;
     rife_v2_slice_flow = 0;
     use_flow_scale = std::abs(_flow_scale - 1.f) > 1e-6f;
     flow_scale = _flow_scale;
     flow_scale_inv = 1.f / _flow_scale;
+    flow_resize_mode = _flow_resize_mode;
     num_threads = _num_threads;
     rife_v2 = _rife_v2;
     rife_v4 = _rife_v4;
@@ -57,6 +61,18 @@ RIFE::~RIFE()
 
         rife_flow_scale_vectors->destroy_pipeline(flownet.opt);
         delete rife_flow_scale_vectors;
+    }
+
+    if (rife_flow_resize_output)
+    {
+        rife_flow_resize_output->destroy_pipeline(flownet.opt);
+        delete rife_flow_resize_output;
+    }
+
+    if (rife_flow_double_vectors)
+    {
+        rife_flow_double_vectors->destroy_pipeline(flownet.opt);
+        delete rife_flow_double_vectors;
     }
 
     if (rife_v2)
@@ -231,6 +247,31 @@ int RIFE::load(const std::string& modeldir)
         }
     }
 
+    if (vkdev)
+    {
+        rife_flow_resize_output = ncnn::create_layer("Interp");
+        rife_flow_resize_output->vkdev = vkdev;
+        {
+            ncnn::ParamDict pd;
+            pd.set(0, 2);// bilinear
+            pd.set(1, 2.f);
+            pd.set(2, 2.f);
+            rife_flow_resize_output->load_param(pd);
+        }
+        rife_flow_resize_output->create_pipeline(opt);
+
+        rife_flow_double_vectors = ncnn::create_layer("BinaryOp");
+        rife_flow_double_vectors->vkdev = vkdev;
+        {
+            ncnn::ParamDict pd;
+            pd.set(0, 2);// mul
+            pd.set(1, 1);// with_scalar
+            pd.set(2, 2.f);
+            rife_flow_double_vectors->load_param(pd);
+        }
+        rife_flow_double_vectors->create_pipeline(opt);
+    }
+
     if (rife_v2)
     {
         {
@@ -330,37 +371,155 @@ static float read_ncnn_scalar(const unsigned char* const data, const size_t inde
     return convert_fp16_to_float32(value);
 }
 
-static float sample_bilinear_channel(const float* const data, const int w, const int h, float x, float y)
+struct BilinearAxisEntry {
+    int index0;
+    int index1;
+    float alpha;
+};
+
+static void build_bilinear_axis_table(const int src_size, const int virtual_out_size, const int dst_size,
+                                      std::vector<BilinearAxisEntry>& table) {
+    table.resize(dst_size);
+    const auto scale = src_size / static_cast<float>(virtual_out_size);
+    for (int i = 0; i < dst_size; i++)
+    {
+        auto sample = (i + 0.5f) * scale - 0.5f;
+        sample = std::max(0.0f, std::min(sample, static_cast<float>(src_size - 1)));
+        const auto i0 = static_cast<int>(std::floor(sample));
+        const auto i1 = std::min(i0 + 1, src_size - 1);
+        table[i] = { i0, i1, sample - i0 };
+    }
+}
+
+static int unpack_flow_channels(const ncnn::Mat& flow_cpu, ncnn::Mat& flow_cpu_unpacked)
 {
-    x = std::max(0.0f, std::min(x, static_cast<float>(w - 1)));
-    y = std::max(0.0f, std::min(y, static_cast<float>(h - 1)));
+    const auto scalar_size = flow_cpu.elempack > 0 ? static_cast<int>(flow_cpu.elemsize / flow_cpu.elempack) : 0;
+    if (flow_cpu.elempack < 1 || (scalar_size != static_cast<int>(sizeof(float)) && scalar_size != static_cast<int>(sizeof(uint16_t))))
+        return -1;
 
-    const auto x0 = static_cast<int>(std::floor(x));
-    const auto y0 = static_cast<int>(std::floor(y));
-    const auto x1 = std::min(x0 + 1, w - 1);
-    const auto y1 = std::min(y0 + 1, h - 1);
+    if (flow_cpu.elempack == 1 && scalar_size == static_cast<int>(sizeof(float)))
+    {
+        flow_cpu_unpacked = flow_cpu;
+        return 0;
+    }
 
-    const auto alpha = x - x0;
-    const auto beta = y - y0;
-    const auto row0 = y0 * w;
-    const auto row1 = y1 * w;
-    const auto v00 = data[row0 + x0];
-    const auto v01 = data[row0 + x1];
-    const auto v10 = data[row1 + x0];
-    const auto v11 = data[row1 + x1];
-    const auto top = v00 * (1.0f - alpha) + v01 * alpha;
-    const auto bottom = v10 * (1.0f - alpha) + v11 * alpha;
+    const int ep = flow_cpu.elempack;
+    const int actual_c = flow_cpu.c * ep;
+    flow_cpu_unpacked.create(flow_cpu.w, flow_cpu.h, actual_c, sizeof(float));
+    const auto pixel_count = static_cast<size_t>(flow_cpu.w) * flow_cpu.h;
+    for (int cg = 0; cg < flow_cpu.c; cg++)
+    {
+        const auto* packed = static_cast<const unsigned char*>(flow_cpu.channel(cg));
+        for (int ep_idx = 0; ep_idx < ep; ep_idx++)
+        {
+            auto* dst = static_cast<float*>(flow_cpu_unpacked.channel(cg * ep + ep_idx));
+            for (size_t i = 0; i < pixel_count; i++)
+                dst[i] = read_ncnn_scalar(packed, i * ep + ep_idx, scalar_size);
+        }
+    }
 
-    return top * (1.0f - beta) + bottom * beta;
+    return 0;
+}
+
+static int copy_flow_output_direct(const ncnn::Mat& flow_cpu_unpacked, float* flow_out, const int w, const int h)
+{
+    if (flow_cpu_unpacked.c < 4 || flow_cpu_unpacked.w < w || flow_cpu_unpacked.h < h)
+        return -1;
+
+    for (int c = 0; c < 4; c++)
+    {
+        const auto* src = static_cast<const float*>(flow_cpu_unpacked.channel(c));
+        auto* dst = flow_out + static_cast<size_t>(c) * w * h;
+        for (int y = 0; y < h; y++)
+            std::memcpy(dst + static_cast<size_t>(y) * w, src + static_cast<size_t>(y) * flow_cpu_unpacked.w, static_cast<size_t>(w) * sizeof(float));
+    }
+
+    return 0;
+}
+
+static int copy_flow_output_resized_cpu(const ncnn::Mat& flow_cpu_unpacked, float* flow_out, const int w, const int h)
+{
+    if (flow_cpu_unpacked.c < 4)
+        return -1;
+
+    const auto flow_w = flow_cpu_unpacked.w;
+    const auto flow_h = flow_cpu_unpacked.h;
+    const auto out_w = flow_w * 2;
+    const auto out_h = flow_h * 2;
+
+    struct AxisCache {
+        int srcW{};
+        int srcH{};
+        int virtualOutW{};
+        int virtualOutH{};
+        int dstW{};
+        int dstH{};
+        std::vector<BilinearAxisEntry> xTable;
+        std::vector<BilinearAxisEntry> yTable;
+    };
+    static thread_local AxisCache axisCache;
+    if (axisCache.srcW != flow_w || axisCache.srcH != flow_h ||
+        axisCache.virtualOutW != out_w || axisCache.virtualOutH != out_h ||
+        axisCache.dstW != w || axisCache.dstH != h)
+    {
+        axisCache.srcW = flow_w;
+        axisCache.srcH = flow_h;
+        axisCache.virtualOutW = out_w;
+        axisCache.virtualOutH = out_h;
+        axisCache.dstW = w;
+        axisCache.dstH = h;
+        build_bilinear_axis_table(flow_w, out_w, w, axisCache.xTable);
+        build_bilinear_axis_table(flow_h, out_h, h, axisCache.yTable);
+    }
+
+    for (int c = 0; c < 4; c++)
+    {
+        const auto* src = static_cast<const float*>(flow_cpu_unpacked.channel(c));
+        auto* dst = flow_out + static_cast<size_t>(c) * w * h;
+        for (int y = 0; y < h; y++)
+        {
+            const auto& yEntry = axisCache.yTable[y];
+            const auto row0 = static_cast<size_t>(yEntry.index0) * flow_w;
+            const auto row1 = static_cast<size_t>(yEntry.index1) * flow_w;
+            for (int x = 0; x < w; x++)
+            {
+                const auto& xEntry = axisCache.xTable[x];
+                const auto top = src[row0 + xEntry.index0] * (1.0f - xEntry.alpha) + src[row0 + xEntry.index1] * xEntry.alpha;
+                const auto bottom = src[row1 + xEntry.index0] * (1.0f - xEntry.alpha) + src[row1 + xEntry.index1] * xEntry.alpha;
+                dst[static_cast<size_t>(y) * w + x] = 2.0f * (top * (1.0f - yEntry.alpha) + bottom * yEntry.alpha);
+            }
+        }
+    }
+
+    return 0;
+}
+
+static bool extract_v4_flow_blob(ncnn::Extractor& ex, ncnn::VkCompute& cmd, ncnn::VkMat& flow)
+{
+    static constexpr std::array<const char*, 8> flow_blob_names{
+        "/Add_4_output_0",
+        "/Add_3_output_0",
+        "Add_4_output_0",
+        "Add_3_output_0",
+        "/Add_2_output_0",
+        "Add_2_output_0",
+        "flow",
+        "/flow"
+    };
+
+    for (const auto* const blob_name : flow_blob_names)
+    {
+        if (ex.extract(blob_name, flow, cmd) == 0 && !flow.empty())
+            return true;
+    }
+
+    return false;
 }
 
 int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0B,
                        const float* src1R, const float* src1G, const float* src1B,
                        float* flow_out, const int w, const int h, const ptrdiff_t stride) const
 {
-    if (rife_v4)
-        return -1;
-
     const int channels = 3;
 
     ncnn::VkAllocator* blob_vkallocator = vkdev->acquire_blob_allocator();
@@ -447,7 +606,34 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
         ex.set_workspace_vkallocator(blob_vkallocator);
         ex.set_staging_vkallocator(staging_vkallocator);
 
-        if (use_flow_scale)
+        if (rife_v4)
+        {
+            ncnn::VkMat timestep_gpu_padded;
+            timestep_gpu_padded.create(w_padded, h_padded, 1, in_out_tile_elemsize, 1, blob_vkallocator);
+
+            std::vector<ncnn::VkMat> bindings(1);
+            bindings[0] = timestep_gpu_padded;
+
+            std::vector<ncnn::vk_constant_type> constants(4);
+            constants[0].i = timestep_gpu_padded.w;
+            constants[1].i = timestep_gpu_padded.h;
+            constants[2].i = timestep_gpu_padded.cstep;
+            constants[3].f = 0.5f;
+
+            cmd.record_pipeline(rife_v4_timestep, bindings, constants, timestep_gpu_padded);
+
+            ex.input("in0", in0_gpu_padded);
+            ex.input("in1", in1_gpu_padded);
+            ex.input("in2", timestep_gpu_padded);
+
+            if (!extract_v4_flow_blob(ex, cmd, flow))
+            {
+                vkdev->reclaim_blob_allocator(blob_vkallocator);
+                vkdev->reclaim_staging_allocator(staging_vkallocator);
+                return -1;
+            }
+        }
+        else if (use_flow_scale)
         {
             ncnn::VkMat in0_gpu_padded_downscaled;
             ncnn::VkMat in1_gpu_padded_downscaled;
@@ -473,66 +659,68 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
     }
 
     ncnn::Mat flow_cpu;
-    cmd.record_clone(flow, flow_cpu, opt);
-    cmd.submit_and_wait();
+    bool used_gpu_resize{};
+    const bool can_try_gpu_resize = !rife_v4 &&
+                                    flow_resize_mode != FlowResizeMode::ForceCPU &&
+                                    vkdev && rife_flow_resize_output && rife_flow_double_vectors;
+    const bool require_gpu_resize = !rife_v4 && flow_resize_mode == FlowResizeMode::ForceGPU;
+    if (can_try_gpu_resize)
+    {
+        ncnn::VkMat flow_resized_gpu;
+        if (rife_flow_resize_output->forward(flow, flow_resized_gpu, cmd, opt) == 0)
+        {
+            ncnn::VkMat flow_scaled_gpu;
+            if (rife_flow_double_vectors->forward(flow_resized_gpu, flow_scaled_gpu, cmd, opt) == 0)
+            {
+                cmd.record_clone(flow_scaled_gpu, flow_cpu, opt);
+                cmd.submit_and_wait();
+                used_gpu_resize = true;
+            }
+        }
+    }
+
+    if (!used_gpu_resize)
+    {
+        if (require_gpu_resize)
+        {
+            vkdev->reclaim_blob_allocator(blob_vkallocator);
+            vkdev->reclaim_staging_allocator(staging_vkallocator);
+            return -1;
+        }
+
+        cmd.record_clone(flow, flow_cpu, opt);
+        cmd.submit_and_wait();
+    }
 
     ncnn::Mat flow_cpu_unpacked;
-    const auto scalar_size = flow_cpu.elempack > 0 ? static_cast<int>(flow_cpu.elemsize / flow_cpu.elempack) : 0;
-    if (flow_cpu.elempack < 1 || (scalar_size != static_cast<int>(sizeof(float)) && scalar_size != static_cast<int>(sizeof(uint16_t))))
+    if (unpack_flow_channels(flow_cpu, flow_cpu_unpacked) != 0)
     {
         vkdev->reclaim_blob_allocator(blob_vkallocator);
         vkdev->reclaim_staging_allocator(staging_vkallocator);
         return -1;
     }
 
-    if (flow_cpu.elempack != 1 || scalar_size != static_cast<int>(sizeof(float)))
+    int export_status{};
+    if (rife_v4)
     {
-        const int ep = flow_cpu.elempack;
-        const int actual_c = flow_cpu.c * ep;
-        flow_cpu_unpacked.create(flow_cpu.w, flow_cpu.h, actual_c, sizeof(float));
-        const auto pixel_count = static_cast<size_t>(flow_cpu.w) * flow_cpu.h;
-        for (int cg = 0; cg < flow_cpu.c; cg++)
-        {
-            const auto* packed = static_cast<const unsigned char*>(flow_cpu.channel(cg));
-            for (int ep_idx = 0; ep_idx < ep; ep_idx++)
-            {
-                auto* dst = static_cast<float*>(flow_cpu_unpacked.channel(cg * ep + ep_idx));
-                for (size_t i = 0; i < pixel_count; i++)
-                {
-                    dst[i] = read_ncnn_scalar(packed, i * ep + ep_idx, scalar_size);
-                }
-            }
-        }
+        if (flow_cpu_unpacked.w >= w && flow_cpu_unpacked.h >= h)
+            export_status = copy_flow_output_direct(flow_cpu_unpacked, flow_out, w, h);
+        else if (flow_cpu_unpacked.w * 2 >= w && flow_cpu_unpacked.h * 2 >= h)
+            export_status = copy_flow_output_resized_cpu(flow_cpu_unpacked, flow_out, w, h);
+        else
+            export_status = -1;
     }
     else
     {
-        flow_cpu_unpacked = flow_cpu;
+        export_status = used_gpu_resize
+            ? copy_flow_output_direct(flow_cpu_unpacked, flow_out, w, h)
+            : copy_flow_output_resized_cpu(flow_cpu_unpacked, flow_out, w, h);
     }
-
-    if (flow_cpu_unpacked.c < 4)
+    if (export_status != 0)
     {
         vkdev->reclaim_blob_allocator(blob_vkallocator);
         vkdev->reclaim_staging_allocator(staging_vkallocator);
         return -1;
-    }
-
-    const auto flow_w = flow_cpu_unpacked.w;
-    const auto flow_h = flow_cpu_unpacked.h;
-    const auto out_w = flow_w * 2;
-    const auto out_h = flow_h * 2;
-    for (auto c = 0; c < 4; c++)
-    {
-        const auto src = static_cast<const float*>(flow_cpu_unpacked.channel(c));
-        auto dst = flow_out + static_cast<size_t>(c) * w * h;
-        for (auto y = 0; y < h; y++)
-        {
-            const auto sample_y = (y + 0.5f) * flow_h / static_cast<float>(out_h) - 0.5f;
-            for (auto x = 0; x < w; x++)
-            {
-                const auto sample_x = (x + 0.5f) * flow_w / static_cast<float>(out_w) - 0.5f;
-                dst[w * y + x] = 2.0f * sample_bilinear_channel(src, flow_w, flow_h, sample_x, sample_y);
-            }
-        }
     }
 
     vkdev->reclaim_blob_allocator(blob_vkallocator);

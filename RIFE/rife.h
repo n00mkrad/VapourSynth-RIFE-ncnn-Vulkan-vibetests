@@ -8,10 +8,17 @@
 // ncnn
 #include "net.h"
 
+enum class FlowResizeMode {
+    Auto,
+    ForceGPU,
+    ForceCPU
+};
+
 class RIFE
 {
 public:
-    RIFE(int gpuid, float flow_scale = 1.f, int num_threads = 1, bool rife_v2 = false, bool rife_v4 = false, int padding = 32);
+    RIFE(int gpuid, float flow_scale = 1.f, int num_threads = 1, bool rife_v2 = false, bool rife_v4 = false,
+         int padding = 32, FlowResizeMode flow_resize_mode = FlowResizeMode::Auto);
     ~RIFE();
 
 #if _WIN32
@@ -45,10 +52,13 @@ private:
     ncnn::Layer* rife_flow_scale_image;
     ncnn::Layer* rife_flow_resize_flow;
     ncnn::Layer* rife_flow_scale_vectors;
+    ncnn::Layer* rife_flow_resize_output;
+    ncnn::Layer* rife_flow_double_vectors;
     ncnn::Layer* rife_v2_slice_flow;
     bool use_flow_scale;
     float flow_scale;
     float flow_scale_inv;
+    FlowResizeMode flow_resize_mode;
     int num_threads;
     bool rife_v2;
     bool rife_v4;
