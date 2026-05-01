@@ -354,10 +354,15 @@ static float sample_bilinear_channel(const float* const data, const int w, const
     return top * (1.0f - beta) + bottom * beta;
 }
 
-int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0B,
-                       const float* src1R, const float* src1G, const float* src1B,
-                       float* flow_out, const int w, const int h, const ptrdiff_t stride) const
+int RIFE::process_flow_native(const float* src0R, const float* src0G, const float* src0B,
+                              const float* src1R, const float* src1G, const float* src1B,
+                              std::vector<float>& flow_out, int& flow_w, int& flow_h,
+                              const int w, const int h, const ptrdiff_t stride) const
 {
+    flow_out.clear();
+    flow_w = 0;
+    flow_h = 0;
+
     if (rife_v4)
         return -1;
 
@@ -365,6 +370,11 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
 
     ncnn::VkAllocator* blob_vkallocator = vkdev->acquire_blob_allocator();
     ncnn::VkAllocator* staging_vkallocator = vkdev->acquire_staging_allocator();
+
+    const auto reclaim_allocators = [&]() {
+        vkdev->reclaim_blob_allocator(blob_vkallocator);
+        vkdev->reclaim_staging_allocator(staging_vkallocator);
+    };
 
     ncnn::Option opt = flownet.opt;
     opt.blob_vkallocator = blob_vkallocator;
@@ -480,8 +490,7 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
     const auto scalar_size = flow_cpu.elempack > 0 ? static_cast<int>(flow_cpu.elemsize / flow_cpu.elempack) : 0;
     if (flow_cpu.elempack < 1 || (scalar_size != static_cast<int>(sizeof(float)) && scalar_size != static_cast<int>(sizeof(uint16_t))))
     {
-        vkdev->reclaim_blob_allocator(blob_vkallocator);
-        vkdev->reclaim_staging_allocator(staging_vkallocator);
+        reclaim_allocators();
         return -1;
     }
 
@@ -511,19 +520,43 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
 
     if (flow_cpu_unpacked.c < 4)
     {
-        vkdev->reclaim_blob_allocator(blob_vkallocator);
-        vkdev->reclaim_staging_allocator(staging_vkallocator);
+        reclaim_allocators();
         return -1;
     }
 
-    const auto flow_w = flow_cpu_unpacked.w;
-    const auto flow_h = flow_cpu_unpacked.h;
+    flow_w = flow_cpu_unpacked.w;
+    flow_h = flow_cpu_unpacked.h;
+    const auto plane_size = static_cast<size_t>(flow_w) * flow_h;
+    flow_out.resize(plane_size * 4);
+    for (auto c = 0; c < 4; c++)
+    {
+        const auto src = static_cast<const float*>(flow_cpu_unpacked.channel(c));
+        auto* dst = flow_out.data() + static_cast<size_t>(c) * plane_size;
+        std::memcpy(dst, src, plane_size * sizeof(float));
+    }
+
+    reclaim_allocators();
+
+    return 0;
+}
+
+int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0B,
+                       const float* src1R, const float* src1G, const float* src1B,
+                       float* flow_out, const int w, const int h, const ptrdiff_t stride) const
+{
+    std::vector<float> flow_native;
+    int flow_w{};
+    int flow_h{};
+    if (process_flow_native(src0R, src0G, src0B, src1R, src1G, src1B, flow_native, flow_w, flow_h, w, h, stride) != 0)
+        return -1;
+
+    const auto plane_size = static_cast<size_t>(flow_w) * flow_h;
     const auto out_w = flow_w * 2;
     const auto out_h = flow_h * 2;
     for (auto c = 0; c < 4; c++)
     {
-        const auto src = static_cast<const float*>(flow_cpu_unpacked.channel(c));
-        auto dst = flow_out + static_cast<size_t>(c) * w * h;
+        const auto* src = flow_native.data() + static_cast<size_t>(c) * plane_size;
+        auto* dst = flow_out + static_cast<size_t>(c) * w * h;
         for (auto y = 0; y < h; y++)
         {
             const auto sample_y = (y + 0.5f) * flow_h / static_cast<float>(out_h) - 0.5f;
@@ -534,9 +567,6 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
             }
         }
     }
-
-    vkdev->reclaim_blob_allocator(blob_vkallocator);
-    vkdev->reclaim_staging_allocator(staging_vkallocator);
 
     return 0;
 }

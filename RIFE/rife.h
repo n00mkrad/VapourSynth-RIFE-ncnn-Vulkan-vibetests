@@ -4,6 +4,7 @@
 #define RIFE_H
 
 #include <string>
+#include <vector>
 
 // ncnn
 #include "net.h"
@@ -28,6 +29,11 @@ public:
     int process_flow(const float* src0R, const float* src0G, const float* src0B,
                      const float* src1R, const float* src1G, const float* src1B,
                      float* flow, const int w, const int h, const ptrdiff_t stride) const;
+
+    int process_flow_native(const float* src0R, const float* src0G, const float* src0B,
+                            const float* src1R, const float* src1G, const float* src1B,
+                            std::vector<float>& flow, int& flow_w, int& flow_h,
+                            const int w, const int h, const ptrdiff_t stride) const;
 
     int process_v4(const float* src0R, const float* src0G, const float* src0B,
                    const float* src1R, const float* src1G, const float* src1B,
