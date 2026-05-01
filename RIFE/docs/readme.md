@@ -47,10 +47,8 @@ core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, mod
 
 - `flow_scale`
   Scales the image before flow estimation and rescales vectors back to the original image coordinates. Smaller values can reduce cost and can sometimes behave better on large motion.
-  In this modified API, the float `flow_scale` replaces the bool `uhd` parameter used by the original plugin.
-  `flow_scale=0.5` matches the old `uhd=True` behavior.
-  The default `flow_scale=1.0` matches the old `uhd=False` default behavior.
-  Values other than `0.5` and `1.0` should be considered experimental here. The original implementation only exposed half-step or multiple-style scaling choices in the `0.25` to `4.0` range.
+  `flow_scale` replaces the `uhd` bool parameter used in the original plugin. To match the old behavior, use `0.5` for uhd=True or `1.0` (default) for uhd=False.
+  Accepted values are restricted to: `0.25`, `0.5`, `1.0`, `2.0`, `4.0`.
 
 - `cpu_flow_resize`
   Debug control for the flow upsampling path used by motion-vector export.

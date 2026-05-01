@@ -279,6 +279,23 @@ static bool supportsMotionVectorExport(const ResolvedRIFEModel& resolvedModel) {
     return !isEarlyUnsupportedRIFEV4Model(resolvedModel.modelPath);
 }
 
+static void validateAndNormalizeFlowScale(float& flowScale) {
+    if (!std::isfinite(flowScale) || flowScale <= 0.f)
+        throw "flow_scale must be finite and greater than 0";
+
+    static constexpr float allowedFlowScales[]{ 0.25f, 0.5f, 1.f, 2.f, 4.f };
+    static constexpr float flowScaleEpsilon = 1e-5f;
+
+    for (const auto allowedFlowScale : allowedFlowScales) {
+        if (std::abs(flowScale - allowedFlowScale) <= flowScaleEpsilon) {
+            flowScale = allowedFlowScale;
+            return;
+        }
+    }
+
+    throw "flow_scale must be one of: 0.25, 0.5, 1.0, 2.0, 4.0";
+}
+
 static void loadRIFEModel(RIFE& rife, const std::string& modelPath) {
 #ifdef _WIN32
     const auto bufferSize = MultiByteToWideChar(CP_UTF8, 0, modelPath.c_str(), -1, nullptr, 0);
@@ -1400,8 +1417,7 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
         if (auto queueCount{ ncnn::get_gpu_info(gpuId).compute_queue_count() }; gpuThread < 1)
             throw "gpu_thread must be greater than 0";
 
-        if (!std::isfinite(flowScale) || flowScale <= 0.f)
-            throw "flow_scale must be greater than 0";
+        validateAndNormalizeFlowScale(flowScale);
 
         
         if (d->skipThreshold < 0 || d->skipThreshold > 60)
@@ -1695,8 +1711,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         if (gpuThread < 1)
             throw "gpu_thread must be greater than 0";
 
-        if (!std::isfinite(flowScale) || flowScale <= 0.f)
-            throw "flow_scale must be greater than 0";
+        validateAndNormalizeFlowScale(flowScale);
 
         const auto resolvedModel = resolveRIFEModel(modelPath);
         if (isEarlyUnsupportedRIFEV4Model(resolvedModel.modelPath))
@@ -1901,8 +1916,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         if (gpuThread < 1)
             throw "gpu_thread must be greater than 0";
 
-        if (!std::isfinite(flowScale) || flowScale <= 0.f)
-            throw "flow_scale must be greater than 0";
+        validateAndNormalizeFlowScale(flowScale);
 
         const auto resolvedModel = resolveRIFEModel(modelPath);
         if (isEarlyUnsupportedRIFEV4Model(resolvedModel.modelPath))
