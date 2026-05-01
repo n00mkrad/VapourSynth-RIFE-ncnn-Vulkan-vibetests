@@ -46,8 +46,6 @@ private:
     ncnn::Layer* rife_flow_resize_flow;
     ncnn::Layer* rife_flow_scale_vectors;
     ncnn::Layer* rife_v2_slice_flow;
-    ncnn::Layer* rife_flow_upsample_interp;
-    ncnn::Layer* rife_flow_upsample_scale;
     bool use_flow_scale;
     float flow_scale;
     float flow_scale_inv;

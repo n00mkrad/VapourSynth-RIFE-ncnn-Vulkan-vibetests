@@ -29,8 +29,6 @@ RIFE::RIFE(int gpuid, float _flow_scale, int _num_threads, bool _rife_v2, bool _
     rife_flow_resize_flow = 0;
     rife_flow_scale_vectors = 0;
     rife_v2_slice_flow = 0;
-    rife_flow_upsample_interp = 0;
-    rife_flow_upsample_scale = 0;
     use_flow_scale = std::abs(_flow_scale - 1.f) > 1e-6f;
     flow_scale = _flow_scale;
     flow_scale_inv = 1.f / _flow_scale;
@@ -47,17 +45,6 @@ RIFE::~RIFE()
         delete rife_preproc;
         delete rife_postproc;
         delete rife_v4_timestep;
-    }
-
-    if (rife_flow_upsample_interp)
-    {
-        rife_flow_upsample_interp->destroy_pipeline(flownet.opt);
-        delete rife_flow_upsample_interp;
-    }
-    if (rife_flow_upsample_scale)
-    {
-        rife_flow_upsample_scale->destroy_pipeline(flownet.opt);
-        delete rife_flow_upsample_scale;
     }
 
     if (use_flow_scale)
@@ -242,31 +229,6 @@ int RIFE::load(const std::string& modeldir)
 
             rife_flow_scale_vectors->create_pipeline(opt);
         }
-    }
-
-    {
-        rife_flow_upsample_interp = ncnn::create_layer("Interp");
-        rife_flow_upsample_interp->vkdev = vkdev;
-
-        ncnn::ParamDict pd;
-        pd.set(0, 2);// bilinear
-        pd.set(1, 2.f);// height_scale
-        pd.set(2, 2.f);// width_scale
-        rife_flow_upsample_interp->load_param(pd);
-
-        rife_flow_upsample_interp->create_pipeline(opt);
-    }
-    {
-        rife_flow_upsample_scale = ncnn::create_layer("BinaryOp");
-        rife_flow_upsample_scale->vkdev = vkdev;
-
-        ncnn::ParamDict pd;
-        pd.set(0, 2);// mul
-        pd.set(1, 1);// with_scalar
-        pd.set(2, 2.f);// b
-        rife_flow_upsample_scale->load_param(pd);
-
-        rife_flow_upsample_scale->create_pipeline(opt);
     }
 
     if (rife_v2)
@@ -510,14 +472,8 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
         }
     }
 
-    ncnn::VkMat flow_upsampled;
-    rife_flow_upsample_interp->forward(flow, flow_upsampled, cmd, opt);
-
-    ncnn::VkMat flow_scaled;
-    rife_flow_upsample_scale->forward(flow_upsampled, flow_scaled, cmd, opt);
-
     ncnn::Mat flow_cpu;
-    cmd.record_clone(flow_scaled, flow_cpu, opt);
+    cmd.record_clone(flow, flow_cpu, opt);
     cmd.submit_and_wait();
 
     ncnn::Mat flow_cpu_unpacked;
@@ -560,15 +516,22 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
         return -1;
     }
 
+    const auto flow_w = flow_cpu_unpacked.w;
+    const auto flow_h = flow_cpu_unpacked.h;
+    const auto out_w = flow_w * 2;
+    const auto out_h = flow_h * 2;
     for (auto c = 0; c < 4; c++)
     {
         const auto src = static_cast<const float*>(flow_cpu_unpacked.channel(c));
         auto dst = flow_out + static_cast<size_t>(c) * w * h;
         for (auto y = 0; y < h; y++)
         {
-            std::memcpy(dst + static_cast<size_t>(w) * y,
-                        src + static_cast<size_t>(flow_cpu_unpacked.w) * y,
-                        w * sizeof(float));
+            const auto sample_y = (y + 0.5f) * flow_h / static_cast<float>(out_h) - 0.5f;
+            for (auto x = 0; x < w; x++)
+            {
+                const auto sample_x = (x + 0.5f) * flow_w / static_cast<float>(out_w) - 0.5f;
+                dst[w * y + x] = 2.0f * sample_bilinear_channel(src, flow_w, flow_h, sample_x, sample_y);
+            }
         }
     }
 
