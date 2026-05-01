@@ -660,10 +660,11 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
 
     ncnn::Mat flow_cpu;
     bool used_gpu_resize{};
-    const bool can_try_gpu_resize = !rife_v4 &&
+    const bool flow_needs_resize = flow.w < w || flow.h < h;
+    const bool can_try_gpu_resize = flow_needs_resize &&
                                     flow_resize_mode != FlowResizeMode::ForceCPU &&
                                     vkdev && rife_flow_resize_output && rife_flow_double_vectors;
-    const bool require_gpu_resize = !rife_v4 && flow_resize_mode == FlowResizeMode::ForceGPU;
+    const bool require_gpu_resize = flow_needs_resize && flow_resize_mode == FlowResizeMode::ForceGPU;
     if (can_try_gpu_resize)
     {
         ncnn::VkMat flow_resized_gpu;
@@ -701,21 +702,12 @@ int RIFE::process_flow(const float* src0R, const float* src0G, const float* src0
     }
 
     int export_status{};
-    if (rife_v4)
-    {
-        if (flow_cpu_unpacked.w >= w && flow_cpu_unpacked.h >= h)
-            export_status = copy_flow_output_direct(flow_cpu_unpacked, flow_out, w, h);
-        else if (flow_cpu_unpacked.w * 2 >= w && flow_cpu_unpacked.h * 2 >= h)
-            export_status = copy_flow_output_resized_cpu(flow_cpu_unpacked, flow_out, w, h);
-        else
-            export_status = -1;
-    }
+    if (flow_cpu_unpacked.w >= w && flow_cpu_unpacked.h >= h)
+        export_status = copy_flow_output_direct(flow_cpu_unpacked, flow_out, w, h);
+    else if (flow_cpu_unpacked.w * 2 >= w && flow_cpu_unpacked.h * 2 >= h)
+        export_status = copy_flow_output_resized_cpu(flow_cpu_unpacked, flow_out, w, h);
     else
-    {
-        export_status = used_gpu_resize
-            ? copy_flow_output_direct(flow_cpu_unpacked, flow_out, w, h)
-            : copy_flow_output_resized_cpu(flow_cpu_unpacked, flow_out, w, h);
-    }
+        export_status = -1;
     if (export_status != 0)
     {
         vkdev->reclaim_blob_allocator(blob_vkallocator);
