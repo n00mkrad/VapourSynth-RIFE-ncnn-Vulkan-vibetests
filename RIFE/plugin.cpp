@@ -30,9 +30,11 @@
 #include <fstream>
 #include <iomanip>
 #include <memory>
+#include <mutex>
 #include <semaphore>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <iostream>
 #include "VapourSynth4.h"
@@ -58,6 +60,16 @@ struct MotionVectorPerfStats final {
     std::atomic<int64_t> vectorPackNs{ 0 };
     std::atomic<int64_t> displacementBuildNs{ 0 };
     std::atomic<int64_t> composeNs{ 0 };
+};
+
+struct MotionVectorScratchBuffers final {
+    std::vector<float> flow;
+    std::vector<float> currentLuma;
+    std::vector<float> referenceLuma;
+    std::vector<float> backwardDisplacement;
+    std::vector<float> forwardDisplacement;
+    std::vector<float> composedX;
+    std::vector<float> composedY;
 };
 
 namespace {
@@ -183,6 +195,50 @@ static void printMotionVectorPerfSummary(const MotionVectorPerfStats& stats, con
               << " vector_pack_ms=" << nsToMs(vectorPackNs)
               << " displacement_build_ms=" << nsToMs(displacementBuildNs)
               << " compose_ms=" << nsToMs(composeNs) << std::endl;
+}
+
+static MotionVectorScratchBuffers& getMotionVectorScratchBuffers() noexcept {
+    static thread_local MotionVectorScratchBuffers scratch;
+    return scratch;
+}
+
+static std::shared_ptr<std::counting_semaphore<>> acquireSharedFlowSemaphore(const int gpuId, const int maxInFlight) {
+    static std::mutex mutex;
+    static std::unordered_map<int, std::weak_ptr<std::counting_semaphore<>>> semaphores;
+
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = semaphores.find(gpuId);
+    if (it != semaphores.end()) {
+        if (auto existing = it->second.lock())
+            return existing;
+    }
+
+    const auto capacity = std::max(1, maxInFlight);
+    auto created = std::make_shared<std::counting_semaphore<>>(capacity);
+    semaphores[gpuId] = created;
+    return created;
+}
+
+static int processFlowWithSemaphores(const RIFE* const rife,
+                                     std::counting_semaphore<>* const localSemaphore,
+                                     std::counting_semaphore<>* const sharedSemaphore,
+                                     const float* src0R, const float* src0G, const float* src0B,
+                                     const float* src1R, const float* src1G, const float* src1B,
+                                     float* flowOut, const int width, const int height, const ptrdiff_t stride,
+                                     int64_t* waitNs = nullptr) noexcept {
+    const auto waitStartNs = waitNs ? monotonicNowNs() : 0;
+    localSemaphore->acquire();
+    if (sharedSemaphore)
+        sharedSemaphore->acquire();
+    if (waitNs)
+        *waitNs = monotonicNowNs() - waitStartNs;
+
+    const auto status = rife->process_flow(src0R, src0G, src0B, src1R, src1G, src1B, flowOut, width, height, stride);
+
+    if (sharedSemaphore)
+        sharedSemaphore->release();
+    localSemaphore->release();
+    return status;
 }
 
 static int computeBlockCount(const int size, const int blockSize, const int overlap, const int padding) noexcept {
@@ -469,6 +525,7 @@ struct RIFEData final {
     MotionVectorConfig mvConfig;
     std::unique_ptr<RIFE> rife;
     std::unique_ptr<std::counting_semaphore<>> semaphore;
+    std::shared_ptr<std::counting_semaphore<>> sharedFlowSemaphore;
 };
 
 struct RIFEMVPairData final {
@@ -477,6 +534,7 @@ struct RIFEMVPairData final {
     MotionVectorConfig mvConfig;
     std::unique_ptr<RIFE> rife;
     std::unique_ptr<std::counting_semaphore<>> semaphore;
+    std::shared_ptr<std::counting_semaphore<>> sharedFlowSemaphore;
     bool perfStats;
     std::shared_ptr<MotionVectorPerfStats> perf;
     std::string perfLabel;
@@ -498,6 +556,7 @@ struct RIFEMVApproxPairData final {
     MotionVectorConfig mvConfig;
     std::unique_ptr<RIFE> rife;
     std::unique_ptr<std::counting_semaphore<>> semaphore;
+    std::shared_ptr<std::counting_semaphore<>> sharedFlowSemaphore;
     bool perfStats;
     std::shared_ptr<MotionVectorPerfStats> perf;
     std::string perfLabel;
@@ -790,17 +849,15 @@ static float sampleBilinearPlane(const float* data, const int width, const int h
     return top * (1.0f - beta) + bottom * beta;
 }
 
-static std::vector<float> buildDisplacementFromFlow(const float* flow, const int width, const int height,
-                                                    const int channelOffset) {
+static void buildDisplacementFromFlow(const float* flow, const int width, const int height,
+                                      const int channelOffset, std::vector<float>& displacement) {
     const auto planeSize = static_cast<size_t>(width) * height;
-    std::vector<float> displacement(planeSize * 2);
+    displacement.resize(planeSize * 2);
 
     for (size_t i = 0; i < planeSize; i++) {
         displacement[i] = -2.0f * flow[(static_cast<size_t>(channelOffset) + 0) * planeSize + i];
         displacement[planeSize + i] = -2.0f * flow[(static_cast<size_t>(channelOffset) + 1) * planeSize + i];
     }
-
-    return displacement;
 }
 
 static bool getDisplacementPlanes(const VSFrame* frame, const char* key, const int width, const int height,
@@ -956,7 +1013,11 @@ static bool attachMotionVectors(const VSFrame* current, const VSFrame* reference
     std::vector<char> vectorBlob;
 
     if (reference) {
-        std::vector<float> flow(static_cast<size_t>(width) * height * 4);
+        auto& scratch = getMotionVectorScratchBuffers();
+        const auto flowSize = static_cast<size_t>(width) * height * 4;
+        scratch.flow.resize(flowSize);
+        const std::vector<float>* currentLumaCache = nullptr;
+        const std::vector<float>* referenceLumaCache = nullptr;
         const auto first = d->mvBackward ? current : reference;
         const auto second = d->mvBackward ? reference : current;
         const auto firstR = reinterpret_cast<const float*>(vsapi->getReadPtr(first, 0));
@@ -966,13 +1027,21 @@ static bool attachMotionVectors(const VSFrame* current, const VSFrame* reference
         const auto secondG = reinterpret_cast<const float*>(vsapi->getReadPtr(second, 1));
         const auto secondB = reinterpret_cast<const float*>(vsapi->getReadPtr(second, 2));
 
-        d->semaphore->acquire();
-        const auto status = d->rife->process_flow(firstR, firstG, firstB, secondR, secondG, secondB, flow.data(), width, height, stride);
-        d->semaphore->release();
+        const auto status = processFlowWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
+                                                      firstR, firstG, firstB, secondR, secondG, secondB,
+                                                      scratch.flow.data(), width, height, stride);
         if (status != 0)
             return false;
 
-        vectorBlob = buildMVToolsVectorBlob(current, reference, flow.data(), true, d, vsapi);
+        if (!d->mvUseChroma) {
+            buildFrameLumaPlane(current, width, height, stride, scratch.currentLuma, vsapi);
+            buildFrameLumaPlane(reference, width, height, stride, scratch.referenceLuma, vsapi);
+            currentLumaCache = &scratch.currentLuma;
+            referenceLumaCache = &scratch.referenceLuma;
+        }
+
+        vectorBlob = buildMVToolsVectorBlob(current, reference, scratch.flow.data(), true, d, vsapi,
+                                            currentLumaCache, referenceLumaCache);
     } else {
         vectorBlob = buildMVToolsVectorBlob(current, current, nullptr, false, d, vsapi);
     }
@@ -1112,9 +1181,11 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             const auto width = vsapi->getFrameWidth(current, 0);
             const auto height = vsapi->getFrameHeight(current, 0);
             const auto stride = vsapi->getStride(current, 0) / vsapi->getVideoFrameFormat(current)->bytesPerSample;
-            std::vector<float> flow(static_cast<size_t>(width) * height * 4);
-            std::vector<float> currentLuma;
-            std::vector<float> referenceLuma;
+            auto& scratch = getMotionVectorScratchBuffers();
+            const auto flowSize = static_cast<size_t>(width) * height * 4;
+            scratch.flow.resize(flowSize);
+            const std::vector<float>* currentLumaCache = nullptr;
+            const std::vector<float>* referenceLumaCache = nullptr;
             const auto currentR = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 0));
             const auto currentG = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 1));
             const auto currentB = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 2));
@@ -1122,14 +1193,14 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
             const auto referenceG = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 1));
             const auto referenceB = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 2));
 
-            const auto semaphoreWaitStartNs = d->perfStats ? monotonicNowNs() : 0;
-            d->semaphore->acquire();
-            if (d->perfStats)
-                accumulatePerfStat(d->perf->semaphoreWaitNs, monotonicNowNs() - semaphoreWaitStartNs);
+            int64_t semaphoreWaitNs{};
             const auto processFlowStartNs = d->perfStats ? monotonicNowNs() : 0;
-            const auto status = d->rife->process_flow(currentR, currentG, currentB, referenceR, referenceG, referenceB, flow.data(), width, height, stride);
-            d->semaphore->release();
+            const auto status = processFlowWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
+                                                          currentR, currentG, currentB, referenceR, referenceG, referenceB,
+                                                          scratch.flow.data(), width, height, stride,
+                                                          d->perfStats ? &semaphoreWaitNs : nullptr);
             if (d->perfStats) {
+                accumulatePerfStat(d->perf->semaphoreWaitNs, semaphoreWaitNs);
                 accumulatePerfStat(d->perf->flowCalls, 1);
                 accumulatePerfStat(d->perf->processFlowNs, monotonicNowNs() - processFlowStartNs);
             }
@@ -1143,19 +1214,19 @@ static const VSFrame* VS_CC rifeMVPairGetFrame(int n, int activationReason, void
 
             if (!d->mvConfig.useChroma) {
                 const auto lumaStartNs = d->perfStats ? monotonicNowNs() : 0;
-                buildFrameLumaPlane(current, width, height, stride, currentLuma, vsapi);
-                buildFrameLumaPlane(reference, width, height, stride, referenceLuma, vsapi);
+                buildFrameLumaPlane(current, width, height, stride, scratch.currentLuma, vsapi);
+                buildFrameLumaPlane(reference, width, height, stride, scratch.referenceLuma, vsapi);
+                currentLumaCache = &scratch.currentLuma;
+                referenceLumaCache = &scratch.referenceLuma;
                 if (d->perfStats)
                     accumulatePerfStat(d->perf->lumaBuildNs, monotonicNowNs() - lumaStartNs);
             }
 
             const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
-            backwardBlob = buildMotionVectorBlobFromConfig(current, reference, flow.data(), true, d->mvConfig, true, vsapi,
-                                                           currentLuma.empty() ? nullptr : &currentLuma,
-                                                           referenceLuma.empty() ? nullptr : &referenceLuma);
-            forwardBlob = buildMotionVectorBlobFromConfig(reference, current, flow.data(), true, d->mvConfig, false, vsapi,
-                                                          referenceLuma.empty() ? nullptr : &referenceLuma,
-                                                          currentLuma.empty() ? nullptr : &currentLuma);
+            backwardBlob = buildMotionVectorBlobFromConfig(current, reference, scratch.flow.data(), true, d->mvConfig, true, vsapi,
+                                                           currentLumaCache, referenceLumaCache);
+            forwardBlob = buildMotionVectorBlobFromConfig(reference, current, scratch.flow.data(), true, d->mvConfig, false, vsapi,
+                                                          referenceLumaCache, currentLumaCache);
             if (d->perfStats)
                 accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
         } else {
@@ -1251,20 +1322,22 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
         auto dst = vsapi->newVideoFrame(&d->vi.format, d->vi.width, d->vi.height, current, core);
         zeroMotionVectorFrame(dst, d->vi, vsapi);
         auto props = vsapi->getFramePropertiesRW(dst);
+        auto& scratch = getMotionVectorScratchBuffers();
 
         std::vector<char> backwardBlob;
         std::vector<char> forwardBlob;
-        std::vector<float> backwardDisplacement;
-        std::vector<float> forwardDisplacement;
+        auto& backwardDisplacement = scratch.backwardDisplacement;
+        auto& forwardDisplacement = scratch.forwardDisplacement;
         const auto planeSize = static_cast<size_t>(d->vi.width) * d->vi.height;
 
         if (reference) {
             const auto width = vsapi->getFrameWidth(current, 0);
             const auto height = vsapi->getFrameHeight(current, 0);
             const auto stride = vsapi->getStride(current, 0) / vsapi->getVideoFrameFormat(current)->bytesPerSample;
-            std::vector<float> flow(static_cast<size_t>(width) * height * 4);
-            std::vector<float> currentLuma;
-            std::vector<float> referenceLuma;
+            const auto flowSize = static_cast<size_t>(width) * height * 4;
+            scratch.flow.resize(flowSize);
+            const std::vector<float>* currentLumaCache = nullptr;
+            const std::vector<float>* referenceLumaCache = nullptr;
             const auto currentR = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 0));
             const auto currentG = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 1));
             const auto currentB = reinterpret_cast<const float*>(vsapi->getReadPtr(current, 2));
@@ -1272,15 +1345,14 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
             const auto referenceG = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 1));
             const auto referenceB = reinterpret_cast<const float*>(vsapi->getReadPtr(reference, 2));
 
-            const auto semaphoreWaitStartNs = d->perfStats ? monotonicNowNs() : 0;
-            d->semaphore->acquire();
-            if (d->perfStats)
-                accumulatePerfStat(d->perf->semaphoreWaitNs, monotonicNowNs() - semaphoreWaitStartNs);
+            int64_t semaphoreWaitNs{};
             const auto processFlowStartNs = d->perfStats ? monotonicNowNs() : 0;
-            const auto status = d->rife->process_flow(currentR, currentG, currentB, referenceR, referenceG, referenceB,
-                                                      flow.data(), width, height, stride);
-            d->semaphore->release();
+            const auto status = processFlowWithSemaphores(d->rife.get(), d->semaphore.get(), d->sharedFlowSemaphore.get(),
+                                                          currentR, currentG, currentB, referenceR, referenceG, referenceB,
+                                                          scratch.flow.data(), width, height, stride,
+                                                          d->perfStats ? &semaphoreWaitNs : nullptr);
             if (d->perfStats) {
+                accumulatePerfStat(d->perf->semaphoreWaitNs, semaphoreWaitNs);
                 accumulatePerfStat(d->perf->flowCalls, 1);
                 accumulatePerfStat(d->perf->processFlowNs, monotonicNowNs() - processFlowStartNs);
             }
@@ -1294,24 +1366,24 @@ static const VSFrame* VS_CC rifeMVApproxPairGetFrame(int n, int activationReason
 
             if (!d->mvConfig.useChroma) {
                 const auto lumaStartNs = d->perfStats ? monotonicNowNs() : 0;
-                buildFrameLumaPlane(current, width, height, stride, currentLuma, vsapi);
-                buildFrameLumaPlane(reference, width, height, stride, referenceLuma, vsapi);
+                buildFrameLumaPlane(current, width, height, stride, scratch.currentLuma, vsapi);
+                buildFrameLumaPlane(reference, width, height, stride, scratch.referenceLuma, vsapi);
+                currentLumaCache = &scratch.currentLuma;
+                referenceLumaCache = &scratch.referenceLuma;
                 if (d->perfStats)
                     accumulatePerfStat(d->perf->lumaBuildNs, monotonicNowNs() - lumaStartNs);
             }
 
             const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
-            backwardBlob = buildMotionVectorBlobFromConfig(current, reference, flow.data(), true, d->mvConfig, true, vsapi,
-                                                           currentLuma.empty() ? nullptr : &currentLuma,
-                                                           referenceLuma.empty() ? nullptr : &referenceLuma);
-            forwardBlob = buildMotionVectorBlobFromConfig(reference, current, flow.data(), true, d->mvConfig, false, vsapi,
-                                                          referenceLuma.empty() ? nullptr : &referenceLuma,
-                                                          currentLuma.empty() ? nullptr : &currentLuma);
+            backwardBlob = buildMotionVectorBlobFromConfig(current, reference, scratch.flow.data(), true, d->mvConfig, true, vsapi,
+                                                           currentLumaCache, referenceLumaCache);
+            forwardBlob = buildMotionVectorBlobFromConfig(reference, current, scratch.flow.data(), true, d->mvConfig, false, vsapi,
+                                                          referenceLumaCache, currentLumaCache);
             if (d->perfStats)
                 accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
             const auto displacementBuildStartNs = d->perfStats ? monotonicNowNs() : 0;
-            backwardDisplacement = buildDisplacementFromFlow(flow.data(), width, height, 0);
-            forwardDisplacement = buildDisplacementFromFlow(flow.data(), width, height, 2);
+            buildDisplacementFromFlow(scratch.flow.data(), width, height, 0, backwardDisplacement);
+            buildDisplacementFromFlow(scratch.flow.data(), width, height, 2, forwardDisplacement);
             if (d->perfStats)
                 accumulatePerfStat(d->perf->displacementBuildNs, monotonicNowNs() - displacementBuildStartNs);
         } else {
@@ -1433,15 +1505,14 @@ static const VSFrame* VS_CC rifeMVApproxOutputGetFrame(int n, int activationReas
             }
         }
 
-        std::vector<float> composedX;
-        std::vector<float> composedY;
+        auto& scratch = getMotionVectorScratchBuffers();
         const auto composeStartNs = d->perfStats ? monotonicNowNs() : 0;
-        composeDisplacementSequence(displacementXs, displacementYs, width, height, composedX, composedY);
+        composeDisplacementSequence(displacementXs, displacementYs, width, height, scratch.composedX, scratch.composedY);
         if (d->perfStats)
             accumulatePerfStat(d->perf->composeNs, monotonicNowNs() - composeStartNs);
         const auto vectorPackStartNs = d->perfStats ? monotonicNowNs() : 0;
         const auto vectorBlob = buildMotionVectorBlobFromDisplacement(current, reference,
-                                                                      composedX.data(), composedY.data(), true,
+                                                                      scratch.composedX.data(), scratch.composedY.data(), true,
                                                                       d->mvConfig, d->backward, vsapi);
         if (d->perfStats)
             accumulatePerfStat(d->perf->vectorPackNs, monotonicNowNs() - vectorPackStartNs);
@@ -1633,10 +1704,11 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
         if (gpuId < 0 || gpuId >= ncnn::get_gpu_count())
             throw "invalid GPU device";
 
-        if (auto queueCount{ ncnn::get_gpu_info(gpuId).compute_queue_count() }; static_cast<uint32_t>(gpuThread) > queueCount)
+        const auto queueCount = std::max(1, static_cast<int>(ncnn::get_gpu_info(gpuId).compute_queue_count()));
+        if (static_cast<uint32_t>(gpuThread) > static_cast<uint32_t>(queueCount))
             std::cerr << "Warning: gpu_thread is recommended to be between 1 and " << queueCount << " (inclusive)" << std::endl;
-        
-        if (auto queueCount{ ncnn::get_gpu_info(gpuId).compute_queue_count() }; gpuThread < 1)
+
+        if (gpuThread < 1)
             throw "gpu_thread must be greater than 0";
 
         validateAndNormalizeFlowScale(flowScale);
@@ -1737,6 +1809,8 @@ static void VS_CC rifeCreate(const VSMap* in, VSMap* out, [[maybe_unused]] void*
         }
 
         d->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
+        if (d->exportMotionVectors)
+            d->sharedFlowSemaphore = acquireSharedFlowSemaphore(gpuId, queueCount);
 
         if (d->skip) {
             auto vmaf{ vsapi->getPluginByID("com.holywu.vmaf", core) };
@@ -1942,7 +2016,8 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         if (gpuId < 0 || gpuId >= ncnn::get_gpu_count())
             throw "invalid GPU device";
 
-        if (auto queueCount{ ncnn::get_gpu_info(gpuId).compute_queue_count() }; static_cast<uint32_t>(gpuThread) > queueCount)
+        const auto queueCount = std::max(1, static_cast<int>(ncnn::get_gpu_info(gpuId).compute_queue_count()));
+        if (static_cast<uint32_t>(gpuThread) > static_cast<uint32_t>(queueCount))
             std::cerr << "Warning: gpu_thread is recommended to be between 1 and " << queueCount << " (inclusive)" << std::endl;
 
         if (gpuThread < 1)
@@ -1992,6 +2067,7 @@ static void VS_CC rifeMVCreate(const VSMap* in, VSMap* out, [[maybe_unused]] voi
         }
 
         pairData->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
+        pairData->sharedFlowSemaphore = acquireSharedFlowSemaphore(gpuId, queueCount);
         pairData->perfStats = perfStats;
         if (pairData->perfStats) {
             pairData->perf = std::make_shared<MotionVectorPerfStats>();
@@ -2172,7 +2248,8 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
         if (gpuId < 0 || gpuId >= ncnn::get_gpu_count())
             throw "invalid GPU device";
 
-        if (auto queueCount{ ncnn::get_gpu_info(gpuId).compute_queue_count() }; static_cast<uint32_t>(gpuThread) > queueCount)
+        const auto queueCount = std::max(1, static_cast<int>(ncnn::get_gpu_info(gpuId).compute_queue_count()));
+        if (static_cast<uint32_t>(gpuThread) > static_cast<uint32_t>(queueCount))
             std::cerr << "Warning: gpu_thread is recommended to be between 1 and " << queueCount << " (inclusive)" << std::endl;
 
         if (gpuThread < 1)
@@ -2225,6 +2302,7 @@ static void rifeMVApproxCreateImpl(const VSMap* in, VSMap* out, VSCore* core, co
 
         sourceNode = vsapi->addNodeRef(pairData->node);
         pairData->semaphore = std::make_unique<std::counting_semaphore<>>(gpuThread);
+        pairData->sharedFlowSemaphore = acquireSharedFlowSemaphore(gpuId, queueCount);
         pairData->perfStats = perfStats;
         if (pairData->perfStats) {
             pairData->perf = std::make_shared<MotionVectorPerfStats>();
