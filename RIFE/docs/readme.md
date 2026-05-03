@@ -32,7 +32,7 @@ That makes it possible to feed RIFE-derived motion into MVTools consumers such a
 - MVTools usually operates on a different clip, often `YUV420P8`. `meta_clip` is still optional and can be used explicitly as the metadata source.
 - If the input is non-`RGBS` and `meta_clip` is omitted, the plugin now uses the original input clip as the metadata source automatically.
 - Vector clips are dummy `Gray8` clips whose pixel values are not meaningful. The motion data lives in frame properties.
-- Exported motion-vector frames also include `RIFEMV_AvgSad`, an integer frame property containing the average block SAD for that frame.
+- Exported motion-vector frames also include `RIFEMV_AvgSad` as an integer frame property containing the raw average exported block SAD, `RIFEMV_AvgSad8x8` as an integer 8x8-equivalent average SAD in MVTools threshold space, plus `RIFEMV_AvgAbsDx`, `RIFEMV_AvgAbsDy`, and `RIFEMV_AvgAbsMotion` as float frame properties containing the average absolute horizontal motion, average absolute vertical motion, and average absolute motion magnitude for that frame.
 - Do not resize or colorspace-convert the exported vector clips after creation.
 
 ## API changes in `rife.RIFE`
@@ -42,7 +42,7 @@ That makes it possible to feed RIFE-derived motion into MVTools consumers such a
 ### Signature
 
 ```python
-core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, cpu_flow_resize=None, mv=0, backward=1, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0, blksize_int_x=None, blksize_int_y=None, sc=0, skip=0, skip_threshold=60.0)
+core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, cpu_flow_resize=None, mv=0, backward=1, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0, blksize_int_x=None, blksize_int_y=None, sc=0, skip=0, skip_threshold=60.0)
 ```
 
 ### New or changed arguments
@@ -92,7 +92,15 @@ core.rife.RIFE(clip, factor_num=2, factor_den=1, fps_num=None, fps_den=None, mod
 - `bits`
   Synthetic bit depth used when computing exported SAD values.
   Default: `8`.
-  If `meta_clip` is given and `bits` is omitted, the plugin may derive bit depth from `meta_clip`.
+  Leaving this at `8` keeps exported SAD on an 8-bit scale regardless of source or `meta_clip` bit depth.
+  Set a higher value only if you explicitly want larger SAD values that track a higher-bit-depth scale.
+  This also sets the exported MVTools `bitsPerSample` metadata so downstream filters scale `thsad` and `thscd1` against the same SAD range.
+
+- `sad_multiplier`
+  Positive multiplier applied to the final synthetic SAD values written into exported MVTools vectors.
+  Default: `1.0`.
+  This scales valid block SADs, invalid-frame sentinel SADs, and therefore `RIFEMV_AvgSad`.
+  It does not affect motion estimation or exported vector `x`/`y` components.
 
 - `meta_clip`
   Metadata-source clip for MVTools compatibility.
@@ -143,7 +151,7 @@ Use this mode when a function expects only one vector clip.
 ### Signature
 
 ```python
-mvbw, mvfw = core.rife.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, cpu_flow_resize=None, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0, blksize_int_x=None, blksize_int_y=None)
+mvbw, mvfw = core.rife.RIFEMV(clip, model_path=..., gpu_id=default_gpu, gpu_thread=2, shared_flow_inflight=None, flow_scale=1.0, cpu_flow_resize=None, perf_stats=False, blksize_x=16, blksize_y=None, overlap_x=None, overlap_y=None, pel=1, delta=1, bits=8, sad_multiplier=1.0, meta_clip=None, matrix_in_s="709", range_in_s="full", hpad=0, vpad=0, block_reduce=1, chroma=0, blksize_int_x=None, blksize_int_y=None)
 ```
 
 ### Return value
@@ -168,6 +176,11 @@ mvbw, mvfw = core.rife.RIFEMV(...)
 - `semaphore_wait_ms` total wait
 - `local_wait_ms` wait on per-filter `gpu_thread` limiter
 - `shared_wait_ms` wait on the cross-instance `shared_flow_inflight` limiter
+
+`sad_multiplier` has the same meaning as in `rife.RIFE(..., mv=1)`:
+- positive float, default `1.0`
+- scales exported synthetic SAD values only
+- does not affect vector estimation or `RIFEMV_AvgAbs*` properties
 
 ### Recommended usage
 

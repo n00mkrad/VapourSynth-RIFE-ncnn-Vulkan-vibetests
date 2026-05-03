@@ -36,7 +36,8 @@ Only the way `pixelDx` and `pixelDy` are obtained differs.
 - `overlap = mv_overlap`: shared region between neighboring blocks
 - `step = blockSize - overlap`: distance between neighboring block origins
 - `pel = mv_pel`: subpixel scale used by the stored vector representation; for example, `pel=2` means vector units are half-pixels
-- `bits = mv_bits`: synthetic bit depth used to scale float differences into integer SAD units
+- `bits = mv_bits`: synthetic bit depth used to quantize comparison samples, scale exported SAD, and set the MVTools `bitsPerSample` metadata used by downstream threshold scaling; default `8` keeps thresholds and SAD on an 8-bit-equivalent scale unless you override it explicitly
+- `sadMultiplier = sad_multiplier`: positive post-scale applied to the final exported SAD values
 - `useChroma = mv_chroma`: if `1`, SAD uses all RGB channels; if `0`, SAD uses luma only
 - `hPadding = mv_hpad`, `vPadding = mv_vpad`: virtual horizontal and vertical analysis padding used for block placement and vector clamping
 - `blockReduce`: how per-pixel motion inside a block is reduced to a single block vector, where `0 = center sample` and `1 = average of the whole block`
@@ -145,14 +146,15 @@ referenceX = clampPixel(currentX + pixelDx, width)
 currentIndex   = currentY   * stride + currentX
 referenceIndex = referenceY * stride + referenceX
 scale = (1 << bits) - 1
+q(v) = round(v * scale) / scale
 ```
 
-Here `currentX/currentY` are the edge-clamped coordinates inside the source block, `referenceX/referenceY` are the corresponding motion-shifted coordinates in the reference frame, and `currentIndex/referenceIndex` are row-major array indices into the planar float buffers. `scale` is the maximum integer sample value for the chosen synthetic bit depth.
+Here `currentX/currentY` are the edge-clamped coordinates inside the source block, `referenceX/referenceY` are the corresponding motion-shifted coordinates in the reference frame, and `currentIndex/referenceIndex` are row-major array indices into the planar float buffers. `scale` is the maximum integer sample value for the chosen synthetic SAD bit depth. `q(v)` is the synthetic-bit-depth quantizer applied to comparison samples before the absolute difference is measured.
 
 If `mv_chroma=1`, the per-pixel contribution is:
 
 ```text
-round((abs(Rc - Rr) + abs(Gc - Gr) + abs(Bc - Br)) * scale)
+round((abs(q(Rc) - q(Rr)) + abs(q(Gc) - q(Gr)) + abs(q(Bc) - q(Br))) * scale)
 ```
 
 If `mv_chroma=0`, RGB is converted to luma first:
@@ -164,12 +166,33 @@ luma(r, g, b) = 0.2126 * r + 0.7152 * g + 0.0722 * b
 and the per-pixel contribution is:
 
 ```text
-round(abs(luma(current) - luma(reference)) * scale)
+round(abs(luma(q(Rc), q(Gc), q(Bc)) - luma(q(Rr), q(Gr), q(Br))) * scale)
 ```
 
 The block `sad` is the sum of those rounded per-pixel contributions over the full `blockSize x blockSize` block. This is a synthetic matching cost intended to populate MVTools metadata, not a native RIFE confidence or loss value.
 
+After that block sum is computed, the plugin applies the exported SAD calibration multiplier:
+
+```text
+sad = round(sad * sadMultiplier)
+```
+
+With the default `sad_multiplier=1.0`, the multiplier itself does not add any extra calibration beyond the chosen SAD bit scale.
+
+With the default `bits=8`, exported SAD stays on an 8-bit-equivalent scale even when the metadata source clip is 10-bit or higher. Because the comparison samples are also quantized to that same synthetic bit depth before differencing and the exported MVTools bit-depth metadata matches that same scale, downstream `thsad` and `thscd1` thresholds stay aligned with the exported SAD values.
+
 Important implementation detail: rounding happens per pixel before accumulation, not once at the end.
+
+## Block-size normalization and frame props
+
+The exported `VECTOR.sad` values stored in `MVTools_vectors` remain raw block SAD values. They therefore grow with larger block sizes, which is expected and required for MVTools compatibility because MVTools already rescales user thresholds such as `thsad` and `thscd1` using block size, chroma mode, and `bitsPerSample`.
+
+That means:
+
+- `RIFEMV_AvgSad` is the raw mean exported block SAD and will generally increase with larger blocks.
+- `RIFEMV_AvgSad8x8` is the same average converted back into the 8x8-equivalent threshold space used by MVTools user parameters. This is the property to compare across different block sizes when you want a more stable threshold-oriented metric.
+
+Because MVTools performs its own block-size normalization internally, changing the actual exported `VECTOR.sad` values to an 8x8-equivalent scale would break downstream threshold behavior.
 
 ## Invalid vectors
 
@@ -178,7 +201,7 @@ If no valid reference frame exists, the vector is marked invalid and uses:
 ```text
 vx = 0
 vy = 0
-sad = blockSize * blockSize * (1 << bits)
+sad = round(blockSize * blockSize * (1 << bits) * sadMultiplier)
 ```
 
 This sentinel is stored directly without running the per-pixel SAD loop.
